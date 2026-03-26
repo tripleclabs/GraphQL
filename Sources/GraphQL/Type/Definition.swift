@@ -274,7 +274,7 @@ extension GraphQLScalarType: Hashable {
  */
 public final class GraphQLObjectType: @unchecked Sendable {
     public let name: String
-    public let description: String?
+    public var description: String?
 
     /// The fields that the object defines. These may be mutated during setup, but should not be
     /// modified once the schema is being used for execution.
