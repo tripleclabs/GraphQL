@@ -1,3 +1,4 @@
+import Foundation
 @testable import GraphQL
 import Testing
 
@@ -195,5 +196,44 @@ import Testing
             [{"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8}]
             """
         )
+    }
+
+    /// `MapEncoder` boxes every scalar as an `NSNumber` before rebuilding a
+    /// `Map` (`_MapEncoder.box(_: Bool)`), so `MapSerialization.map(with:)` has
+    /// to recognise the CFBoolean-backed ones. Without that check a `Bool`
+    /// comes back as `.number` and re-encodes as `0`/`1`, silently turning
+    /// every boolean in a JSON payload into a number on the wire.
+    @Test func encoderPreservesBooleans() throws {
+        struct Flags: Encodable {
+            let enabled: Bool
+            let disabled: Bool
+            let count: Int
+        }
+
+        let map = try MapEncoder().encode(Flags(enabled: true, disabled: false, count: 3))
+
+        #expect(map["enabled"] == .bool(true))
+        #expect(map["disabled"] == .bool(false))
+        #expect(map["count"] == .number(3))
+    }
+
+    /// The wire form is what actually breaks clients: a boolean must serialize
+    /// as `true`/`false`, not `1`/`0`.
+    @Test func encodedBooleansSerializeAsBooleans() throws {
+        struct Flags: Encodable {
+            let enabled: Bool
+            let disabled: Bool
+        }
+
+        let map = try MapEncoder().encode(Flags(enabled: true, disabled: false))
+        let json = try String(data: JSONEncoder().encode(map), encoding: .utf8)
+
+        #expect(json == #"{"enabled":true,"disabled":false}"# || json == #"{"disabled":false,"enabled":true}"#)
+    }
+
+    /// A standalone `Bool` at the top level, not just one nested in an object.
+    @Test func encoderPreservesTopLevelBoolean() throws {
+        #expect(try MapEncoder().encode(true) == .bool(true))
+        #expect(try MapEncoder().encode(false) == .bool(false))
     }
 }

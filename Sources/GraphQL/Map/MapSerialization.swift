@@ -7,6 +7,15 @@ public struct MapSerialization {
         case is NSNull:
             return .null
         case let number as NSNumber:
+            // `_MapEncoder` boxes every scalar as an `NSNumber`, including
+            // `Bool` (`box(_ value: Bool)`). Booleans are backed by CFBoolean,
+            // so recover them here — otherwise a `Bool` becomes `.number`, whose
+            // `Number(NSNumber)` initializer sets `storageType = .unknown`, and
+            // `Map.encode` then writes it out via `doubleValue` as `0`/`1`.
+            // `_MapDecoder.unbox(_:as: Bool.Type)` makes the same distinction.
+            if isBoolean(number) {
+                return .bool(number.boolValue)
+            }
             return .number(Number(number))
         case let string as NSString:
             return .string(string as String)
@@ -58,6 +67,16 @@ public struct MapSerialization {
                 )
             )
         }
+    }
+
+    /// Whether an `NSNumber` is really a boxed `Bool`. The bridging differs by
+    /// platform, so this mirrors `_MapDecoder.unbox(_:as: Bool.Type)` exactly.
+    private static func isBoolean(_ number: NSNumber) -> Bool {
+        #if DEPLOYMENT_RUNTIME_SWIFT || os(Linux) || os(Android)
+            return CFGetTypeID(number) == CFBooleanGetTypeID()
+        #else
+            return number === kCFBooleanTrue as NSNumber || number === kCFBooleanFalse as NSNumber
+        #endif
     }
 
     static func object(with map: Map) throws -> NSObject {
