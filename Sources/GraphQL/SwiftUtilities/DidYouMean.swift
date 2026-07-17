@@ -1,4 +1,4 @@
-private let MAX_SUGGESTIONS = 5
+let maximumSuggestionCount = 5
 
 func didYouMean(_ submessage: String? = nil, suggestions: [String]) -> String {
     guard !suggestions.isEmpty else {
@@ -10,7 +10,7 @@ func didYouMean(_ submessage: String? = nil, suggestions: [String]) -> String {
         message.append("\(submessage) ")
     }
 
-    let suggestionList = suggestions[0 ... min(suggestions.count - 1, MAX_SUGGESTIONS - 1)]
+    let suggestionList = suggestions[0 ... min(suggestions.count - 1, maximumSuggestionCount - 1)]
         .map { "\"\($0)\"" }.orList()
     return message + "\(suggestionList)?"
 }
