@@ -9,9 +9,7 @@ func unwrap(_ value: any Sendable) -> (any Sendable)? {
         return nil
     }
 
-    // Despite the warning, we must force unwrap because on optional unwrap, compiler throws:
-    // `marker protocol 'Sendable' cannot be used in a conditional cast`
-    return (child.value as! (any Sendable))
+    return assumeSendable(child.value)
 }
 
 extension Mirror {
@@ -20,8 +18,9 @@ extension Mirror {
             return nil
         }
 
-        // Despite the warning, we must force unwrap because on optional unwrap, compiler throws:
-        // `marker protocol 'Sendable' cannot be used in a conditional cast`
-        return unwrap(matched.value as! (any Sendable))
+        // `Mirror.Child` erases the property's static type to `Any`. The source value entered
+        // GraphQL through a Sendable resolver boundary, so its reflected stored properties must
+        // uphold that same contract.
+        return unwrap(assumeSendable(matched.value))
     }
 }

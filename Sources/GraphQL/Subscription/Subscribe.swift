@@ -42,10 +42,9 @@ func subscribe(
                         let result = try await execute(
                             schema: schema,
                             documentAST: documentAST,
-                            // Despite the warning, we must force unwrap because on optional unwrap,
-                            // compiler throws:
-                            // `marker protocol 'Sendable' cannot be used in a conditional cast`
-                            rootValue: event as! (any Sendable),
+                            // AsyncSequence erases its Element type when used as an existential.
+                            // Subscription resolvers must emit Sendable event payloads.
+                            rootValue: assumeSendable(event),
                             context: context,
                             variableValues: variableValues,
                             operationName: operationName
@@ -202,7 +201,7 @@ func executeSubscription(
         info: info
     )
 
-    let resolved: Any?
+    let resolved: (any Sendable)?
     switch resolvedOrError {
     case let .failure(error):
         if let graphQLError = error as? GraphQLError {
@@ -218,10 +217,9 @@ func executeSubscription(
     } else if let error = resolved as? GraphQLError {
         return .failure(.init([error]))
     } else if let stream = resolved as? any AsyncSequence {
-        // Force cast is required because Swift doesn't allow conditional casting with marker
-        // protocols like Sendable. This is safe because subscription resolvers should only
-        // return Sendable AsyncSequences.
-        return .success(stream as! (any AsyncSequence & Sendable))
+        // `resolved` came from GraphQLFieldResolve as `any Sendable`; the AsyncSequence cast
+        // erases that marker conformance from the existential type.
+        return .success(restoringSendableConformance(of: stream))
     } else if resolved == nil {
         return .failure(.init([
             GraphQLError(message: "Resolved subscription was nil"),
