@@ -11,10 +11,7 @@ func KnownTypeNamesRule(context: SDLorNormalValidationContext) -> Visitor {
     let definitions = context.ast.definitions
     let existingTypesMap = context.getSchema()?.typeMap ?? [:]
 
-    var typeNames = Set<String>()
-    for typeName in existingTypesMap.keys {
-        typeNames.insert(typeName)
-    }
+    var documentTypeNames = Set<String>()
     for definition in definitions {
         if
             isTypeSystemDefinitionNode(definition),
@@ -22,7 +19,7 @@ func KnownTypeNamesRule(context: SDLorNormalValidationContext) -> Visitor {
             case let .node(nameNode) = nameResult,
             let name = nameNode as? Name
         {
-            typeNames.insert(name.value)
+            documentTypeNames.insert(name.value)
         }
     }
 
@@ -32,7 +29,7 @@ func KnownTypeNamesRule(context: SDLorNormalValidationContext) -> Visitor {
             case .namedType:
                 let type = node as! NamedType
                 let typeName = type.name.value
-                if !typeNames.contains(typeName) {
+                if existingTypesMap[typeName] == nil, !documentTypeNames.contains(typeName) {
                     let definitionNode = ancestors.count > 2 ? ancestors[2] : parent
                     var isSDL = false
                     if let definitionNode = definitionNode, case let .node(node) = definitionNode {
@@ -42,9 +39,11 @@ func KnownTypeNamesRule(context: SDLorNormalValidationContext) -> Visitor {
                         return .continue
                     }
 
+                    var suggestionTypeNames = Set(existingTypesMap.keys)
+                    suggestionTypeNames.formUnion(documentTypeNames)
                     let suggestedTypes = suggestionList(
                         input: typeName,
-                        options: Array(typeNames)
+                        options: Array(suggestionTypeNames)
                     )
                     context.report(
                         error: GraphQLError(

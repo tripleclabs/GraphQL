@@ -60,3 +60,35 @@ class KnownTypeNamesRuleTests: ValidationTestCase {
         )
     }
 }
+
+class KnownTypeNamesSDLRuleTests: SDLValidationTestCase {
+    override init() {
+        super.init()
+        rule = KnownTypeNamesRule
+    }
+
+    @Test func recognizesTypesDefinedInTheDocument() throws {
+        try assertValidationErrors(
+            """
+            type Query { local: Local }
+            type Local { value: String }
+            """,
+            []
+        )
+    }
+
+    @Test func suggestsTypesDefinedInTheDocument() throws {
+        try assertValidationErrors(
+            """
+            type Query { local: Locla }
+            type Local { value: String }
+            """,
+            [
+                GraphQLError(
+                    message: #"Unknown type "Locla". Did you mean "Local"?"#,
+                    locations: [.init(line: 1, column: 21)]
+                ),
+            ]
+        )
+    }
+}
