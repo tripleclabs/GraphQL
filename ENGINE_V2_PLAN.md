@@ -288,7 +288,7 @@ compile the existing authoritative schema into immutable numeric tables.
 - Added a `GraphQL` adapter that compiles the existing authoritative schema into fast metadata plus
   aligned named-type, field-definition, and default-value side tables.
 - Added a schema-lifetime cache protected during initialization; the resulting compiled value is
-  immutable and requires no synchronization for reads.
+  one immutable reference object and requires no synchronization for reads.
 - Added correctness coverage for every named type kind, root operation IDs, field and type lookup,
   arguments, defaults, nested list/non-null shapes, backing-store cache reuse, and 32-task
   concurrent reads.
@@ -296,15 +296,21 @@ compile the existing authoritative schema into immutable numeric tables.
 
 | Schema boundary | Engine V1 | Engine V2 |
 | --- | ---: | ---: |
-| Cold metadata compilation | n/a | 16,661.81 ns |
-| Cached-view acquisition | n/a | 245.24 ns |
-| Type lookup by existing `String` | 9.77 ns | 11.89 ns |
-| Field lookup by existing `String` | 24.42 ns | 21.29 ns |
+| Cold metadata compilation | n/a | 16,448.55 ns |
+| Cached-view acquisition | n/a | 185.49 ns |
+| Type lookup by existing `String` | 9.34 ns | 10.05 ns |
+| Field lookup by existing `String` | 23.38 ns | 18.80 ns |
 
 Cold compilation is a one-time schema cost. Cached-view acquisition must occur at request setup,
 not per field. Phase 3 request compilation will add source-range/hash lookup that avoids allocating
 temporary strings; the current string-keyed lookup exists for adapter verification and baseline
 comparison.
+
+The initial lookup harness gave Engine V2 an extra non-inlined consumption call, and the compiled
+schema was initially a large value struct while Engine V1 passed a class reference. Correcting the
+harness and using an immutable schema-lifetime reference reduced type lookup from 11.89 ns to
+10.05 ns and cached acquisition from 245.24 ns to 185.49 ns. The remaining 0.71 ns type-lookup
+difference is specific to temporary `String` dictionary lookup and is not the Phase 3 request path.
 
 ## Phase 0: Baseline and Contracts
 

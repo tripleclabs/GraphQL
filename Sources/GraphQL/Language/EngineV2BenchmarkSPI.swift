@@ -14,11 +14,6 @@ public func engineV1TokenChecksum(_ source: String) throws -> Int {
 }
 
 @_spi(EngineV2Benchmark)
-public func engineV1TypeLookupChecksum(_ schema: GraphQLSchema, name: String) -> Int {
-    schema.getType(name: name)?.name.utf8.count ?? 0
-}
-
-@_spi(EngineV2Benchmark)
 public func engineV1FieldLookupChecksum(
     _ schema: GraphQLSchema,
     parentTypeName: String,

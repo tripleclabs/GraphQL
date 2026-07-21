@@ -148,7 +148,7 @@ public struct FastSchemaInputValue: Sendable {
 }
 
 /// Immutable numeric metadata compiled once from the authoritative public schema.
-public struct FastCompiledSchema: Sendable {
+public final class FastCompiledSchema: Sendable {
     public let names: ContiguousArray<String>
     public let types: ContiguousArray<FastSchemaType>
     public let typeReferences: ContiguousArray<FastSchemaTypeReference>
@@ -156,9 +156,9 @@ public struct FastCompiledSchema: Sendable {
     public let inputValues: ContiguousArray<FastSchemaInputValue>
     public let roots: FastSchemaRoots
 
-    private let nameLookup: [String: FastSchemaNameID]
-    private let typeLookup: [String: FastSchemaTypeID]
-    private let fieldLookup: [FieldLookupKey: FastSchemaFieldID]
+    @usableFromInline let nameLookup: [String: FastSchemaNameID]
+    @usableFromInline let typeLookup: [String: FastSchemaTypeID]
+    @usableFromInline let fieldLookup: [FieldLookupKey: FastSchemaFieldID]
 
     public init(
         names: ContiguousArray<String>,
@@ -203,10 +203,12 @@ public struct FastCompiledSchema: Sendable {
         names[Int(id.rawValue)]
     }
 
+    @inlinable
     public func typeID(named name: String) -> FastSchemaTypeID? {
         typeLookup[name]
     }
 
+    @inlinable
     public func fieldID(
         on parent: FastSchemaTypeID,
         named name: String
@@ -216,7 +218,14 @@ public struct FastCompiledSchema: Sendable {
     }
 }
 
-private struct FieldLookupKey: Sendable, Hashable {
+@usableFromInline
+struct FieldLookupKey: Sendable, Hashable {
     let parent: FastSchemaTypeID
     let name: FastSchemaNameID
+
+    @usableFromInline
+    init(parent: FastSchemaTypeID, name: FastSchemaNameID) {
+        self.parent = parent
+        self.name = name
+    }
 }

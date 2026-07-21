@@ -108,8 +108,13 @@ private func consumeCompiledSchema(_ schema: FastCompiledSchema) -> Int {
 }
 
 @inline(never)
-private func consumeTypeID(_ id: FastSchemaTypeID?) -> Int {
-    Int(id?.rawValue ?? 0)
+private func benchmarkV1TypeLookup(_ schema: GraphQLSchema, name: String) -> Int {
+    schema.getType(name: name)?.name.utf8.count ?? 0
+}
+
+@inline(never)
+private func benchmarkV2TypeLookup(_ schema: FastCompiledSchema, name: String) -> Int {
+    Int(schema.typeID(named: name)?.rawValue ?? 0)
 }
 
 @inline(never)
@@ -184,10 +189,10 @@ private let measurements = [
         try consumeCompiledSchema(engineV2CachedSchema(benchmarkSchema))
     },
     measure("v1_schema_type_lookup") {
-        engineV1TypeLookupChecksum(benchmarkSchema, name: "Person")
+        benchmarkV1TypeLookup(benchmarkSchema, name: "Person")
     },
     measure("v2_schema_type_lookup") {
-        consumeTypeID(cachedBenchmarkSchema.typeID(named: "Person"))
+        benchmarkV2TypeLookup(cachedBenchmarkSchema, name: "Person")
     },
     measure("v1_schema_field_lookup") {
         try engineV1FieldLookupChecksum(
