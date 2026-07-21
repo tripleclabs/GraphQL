@@ -13,6 +13,23 @@ public func engineV1TokenChecksum(_ source: String) throws -> Int {
     }
 }
 
+@_spi(EngineV2Benchmark)
+public func engineV1TypeLookupChecksum(_ schema: GraphQLSchema, name: String) -> Int {
+    schema.getType(name: name)?.name.utf8.count ?? 0
+}
+
+@_spi(EngineV2Benchmark)
+public func engineV1FieldLookupChecksum(
+    _ schema: GraphQLSchema,
+    parentTypeName: String,
+    fieldName: String
+) throws -> Int {
+    guard let parent = schema.getType(name: parentTypeName) as? GraphQLObjectType,
+          let field = try parent.getFields()[fieldName]
+    else { return 0 }
+    return field.name.utf8.count
+}
+
 /// Adapts compact Engine V2 parser failures into the existing eager public error representation.
 /// This is SPI while the new engine remains disconnected from the public request path.
 @_spi(EngineV2Benchmark)

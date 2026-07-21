@@ -34,6 +34,9 @@ private let blockStringQuery = #"""
 private let parsedSuccessfulQuery = try! FastParser.parse(successfulQuery)
 private let parsedEscapedStringQuery = try! FastParser.parse(escapedStringQuery)
 private let parsedBlockStringQuery = try! FastParser.parse(blockStringQuery)
+private let benchmarkSchema = try! makeBenchmarkSchema()
+private let cachedBenchmarkSchema = try! engineV2CachedSchema(benchmarkSchema)
+private let benchmarkQueryTypeID = cachedBenchmarkSchema.typeID(named: "Query")!
 
 private let environment = ProcessInfo.processInfo.environment
 private let warmup = Int(environment["WARMUP"] ?? "1000") ?? 1000
@@ -98,6 +101,22 @@ private func consumeString(_ string: String) -> Int {
     withExtendedLifetime(string) { string.utf8.count }
 }
 
+@inline(never)
+private func consumeCompiledSchema(_ schema: FastCompiledSchema) -> Int {
+    schema.names.count &+ schema.types.count &+ schema.fields.count &+
+        schema.typeReferences.count &+ schema.inputValues.count
+}
+
+@inline(never)
+private func consumeTypeID(_ id: FastSchemaTypeID?) -> Int {
+    Int(id?.rawValue ?? 0)
+}
+
+@inline(never)
+private func consumeFieldID(_ id: FastSchemaFieldID?) -> Int {
+    Int(id?.rawValue ?? 0)
+}
+
 private func firstArgumentValue(in document: FastDocument) -> UInt32 {
     document.arguments[0].value
 }
@@ -158,6 +177,31 @@ private let measurements = [
             valueAt: firstArgumentValue(in: parsedBlockStringQuery)
         ))
     },
+    measure("v2_schema_compile") {
+        try consumeCompiledSchema(engineV2CompileSchema(benchmarkSchema))
+    },
+    measure("v2_schema_cached_view") {
+        try consumeCompiledSchema(engineV2CachedSchema(benchmarkSchema))
+    },
+    measure("v1_schema_type_lookup") {
+        engineV1TypeLookupChecksum(benchmarkSchema, name: "Person")
+    },
+    measure("v2_schema_type_lookup") {
+        consumeTypeID(cachedBenchmarkSchema.typeID(named: "Person"))
+    },
+    measure("v1_schema_field_lookup") {
+        try engineV1FieldLookupChecksum(
+            benchmarkSchema,
+            parentTypeName: "Query",
+            fieldName: "person"
+        )
+    },
+    measure("v2_schema_field_lookup") {
+        consumeFieldID(cachedBenchmarkSchema.fieldID(
+            on: benchmarkQueryTypeID,
+            named: "person"
+        ))
+    },
     measure("v1_parse_malformed") {
         do {
             return try parse(source: malformedQuery, noLocation: true).definitions.count
@@ -180,6 +224,37 @@ private let measurements = [
         }
     },
 ]
+
+private func makeBenchmarkSchema() throws -> GraphQLSchema {
+    let species = try GraphQLObjectType(
+        name: "Species",
+        fields: [
+            "id": GraphQLField(type: GraphQLNonNull(GraphQLID)),
+            "name": GraphQLField(type: GraphQLNonNull(GraphQLString)),
+            "classification": GraphQLField(type: GraphQLString),
+        ]
+    )
+    let person = try GraphQLObjectType(
+        name: "Person",
+        fields: [
+            "id": GraphQLField(type: GraphQLNonNull(GraphQLID)),
+            "name": GraphQLField(type: GraphQLNonNull(GraphQLString)),
+            "birthYear": GraphQLField(type: GraphQLString),
+            "species": GraphQLField(type: species),
+        ]
+    )
+    let query = try GraphQLObjectType(
+        name: "Query",
+        fields: [
+            "person": GraphQLField(
+                type: person,
+                args: ["id": GraphQLArgument(type: GraphQLNonNull(GraphQLID))]
+            ),
+            "people": GraphQLField(type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person)))),
+        ]
+    )
+    return try GraphQLSchema(query: query)
+}
 
 print("Release microbenchmark: \(warmup) warmups, \(iterations) iterations, \(sampleCount) samples")
 print("| Boundary | Median |")

@@ -51,6 +51,11 @@ public final class GraphQLSchema: @unchecked Sendable {
         label: "graphql.schema.subtypeMap",
         attributes: .concurrent
     )
+    var _engineV2CompiledSchema: EngineV2CompiledSchema?
+    let engineV2SchemaQueue = DispatchQueue(
+        label: "graphql.schema.engineV2",
+        attributes: .concurrent
+    )
     var subTypeMap: [String: [String: Bool]] {
         get {
             // Reads can occur concurrently.

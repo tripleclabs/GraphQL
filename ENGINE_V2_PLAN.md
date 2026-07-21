@@ -34,23 +34,19 @@ Last updated: 2026-07-21
 
 ### Current milestone
 
-Phase 0 and broader Phase 1 executable-document coverage:
+Phase 2 compiled schema representation:
 
-- [x] Preserve the Engine V1 benchmark baseline and metadata.
-- [x] Create the `GraphQLFast` target.
-- [x] Create the `GraphQLFastTests` target.
-- [x] Define the compact document storage representation.
-- [x] Implement the UTF-8 lexer.
-- [x] Differential-test lexer behavior against Engine V1.
-- [x] Parse all six benchmark documents with structural differential coverage.
-- [x] Expand differential parsing across the existing executable-document corpus.
-- [x] Parse variable definitions and type references.
-- [x] Parse directives at executable-document locations.
-- [x] Parse list and object input values.
-- [x] Parse named fragment definitions.
-- [x] Match decoded string and block-string value semantics.
-- [x] Adapt compact parser failures into public `GraphQLError` parity.
-- [x] Add lexer and parser microbenchmark measurements.
+- [x] Define numeric type, field, name, and type-reference IDs.
+- [x] Compile all six named type kinds into dense immutable tables.
+- [x] Compile object and interface fields.
+- [x] Compile arguments, input-object fields, default-presence flags, and aligned default storage.
+- [x] Precompute nested named, list, and non-null type-reference shapes.
+- [x] Cache one immutable compiled view on the authoritative `GraphQLSchema`.
+- [x] Add schema compilation, cache acquisition, type lookup, and field lookup microbenchmarks.
+- [ ] Compile interface and union membership tables.
+- [ ] Compile enum values, directives, and remaining introspection metadata.
+- [ ] Store resolver thunks directly alongside field records.
+- [ ] Compile every existing test schema or explicitly classify unsupported behavior.
 
 Status notes and benchmark evidence must be added to this document as work lands. A checked item
 means its implementation and proportionate verification are complete, not merely started.
@@ -284,6 +280,31 @@ measured 2,587.04 ns at the directly comparable successful-parse boundary.
 
 Phase 1 is complete. Engine V2 remains disconnected from the public request path; Phase 2 will
 compile the existing authoritative schema into immutable numeric tables.
+
+### 2026-07-21: Phase 2 numeric schema foundation
+
+- Added fixed-width IDs and dense tables for interned names, named types, fields, input values, and
+  wrapped type references in the dependency-free `GraphQLFast` target.
+- Added a `GraphQL` adapter that compiles the existing authoritative schema into fast metadata plus
+  aligned named-type, field-definition, and default-value side tables.
+- Added a schema-lifetime cache protected during initialization; the resulting compiled value is
+  immutable and requires no synchronization for reads.
+- Added correctness coverage for every named type kind, root operation IDs, field and type lookup,
+  arguments, defaults, nested list/non-null shapes, backing-store cache reuse, and 32-task
+  concurrent reads.
+- Full regression verification: 913 tests in 70 suites passed.
+
+| Schema boundary | Engine V1 | Engine V2 |
+| --- | ---: | ---: |
+| Cold metadata compilation | n/a | 16,661.81 ns |
+| Cached-view acquisition | n/a | 245.24 ns |
+| Type lookup by existing `String` | 9.77 ns | 11.89 ns |
+| Field lookup by existing `String` | 24.42 ns | 21.29 ns |
+
+Cold compilation is a one-time schema cost. Cached-view acquisition must occur at request setup,
+not per field. Phase 3 request compilation will add source-range/hash lookup that avoids allocating
+temporary strings; the current string-keyed lookup exists for adapter verification and baseline
+comparison.
 
 ## Phase 0: Baseline and Contracts
 
