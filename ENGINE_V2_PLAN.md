@@ -34,7 +34,27 @@ Last updated: 2026-07-21
 
 ### Current milestone
 
-Phase 2 compiled schema representation:
+Performance viability gate: execute the benchmark's `single_item` case entirely through a narrow
+Engine V2 vertical slice spanning fused planning, synchronous execution, completion, and public
+result materialization. Remaining schema/introspection breadth is deliberately deferred until this
+gate produces an end-to-end number.
+
+- [ ] Add comparable Engine V1 component timing for parse, validate/plan, execute/complete, and
+  public-result materialization.
+- [ ] Define a conservative Engine V2 eligibility check that falls back before invoking resolvers.
+- [ ] Compile the benchmark query from compact source ranges directly to numeric schema IDs and a
+  contiguous executable field plan.
+- [ ] Execute source-only and synchronous resolvers without Swift concurrency state machines or
+  constructing unused `GraphQLResolveInfo`, argument maps, field arrays, or paths.
+- [ ] Complete scalars, objects, lists, and non-null propagation into a preallocated result arena.
+- [ ] Convert the arena once into the existing public `Map` result.
+- [ ] Differentially verify the supported query and relevant error/null behavior against Engine V1.
+- [ ] Benchmark the complete `single_item` request with the same parsing, validation, execution,
+  and materialization contract as Rust.
+- [ ] Reach the viability gate of at most 2x the Rust baseline before resuming broad completeness.
+- [ ] Reach the primary target of within 10% of Rust before expanding the fast path case-by-case.
+
+Phase 2 foundation status; unchecked breadth items are paused, not abandoned:
 
 - [x] Define numeric type, field, name, and type-reference IDs.
 - [x] Compile all six named type kinds into dense immutable tables.
@@ -65,11 +85,13 @@ means its implementation and proportionate verification are complete, not merely
 - Engine V2 is still isolated from the public execution path; Engine V1 remains authoritative.
 - Phase 1 is complete. Phase 2 is in progress with numeric schema tables, abstract membership,
   enum/directive structure, and aligned resolver/subscription thunks complete.
-- The next task is to compile descriptions and full deprecation/introspection metadata, then run
-  the compiler across the existing test-schema corpus and classify every unsupported behavior as
-  an explicit Engine V1 fallback.
-- Do not begin Phase 3 request planning until the remaining Phase 2 checklist items above are
-  complete.
+- Strategic priority is now the performance viability gate above. Remaining description,
+  introspection, and whole-corpus schema work is deferred until the vertical slice is measured.
+- The next task is to instrument the current `single_item` path into comparable component timings,
+  then implement the smallest fused numeric plan that supports that exact query with an explicit
+  pre-resolver fallback for unsupported features.
+- Do not resume broad Phase 2 completeness work merely to increase feature count. First produce the
+  Engine V2 end-to-end `single_item` number and evaluate it against the gates below.
 - Focused verification command: `swift test --filter FastCompiledSchemaTests`.
 - Full verification command: `swift test`.
 - Release microbenchmark command: `swift run -c release graphql-fast-benchmarks`.
@@ -396,6 +418,78 @@ the later completion path, not claiming that preselection alone solves resolver 
 On the expanded fixture, the repeat run measured cold schema compilation at 24,767.87 ns and
 cached-view acquisition at 203.16 ns. Both remain one-time/request-setup costs and must not enter
 the per-field execution loop.
+
+### 2026-07-21: performance-first vertical-slice decision
+
+Further schema metadata breadth is paused because the completed microbenchmarks do not explain the
+original 142.35 us Swift `single_item` result:
+
+- Compact parsing is approximately 0.42 us.
+- Possible-type checks are approximately 1.5 ns.
+- Preselected source-only resolver invocation is approximately 28 ns.
+- Cold schema compilation is a one-time cost and cached schema acquisition is request setup.
+
+The remaining order-of-magnitude gap must therefore be attacked in validation/planning, execution
+orchestration, completion, allocation/ARC traffic, and public result construction. The next engine
+work will be a deliberately narrow but semantically complete `single_item` path, with Engine V1 as
+the fallback for every unsupported document before any resolver is invoked.
+
+#### Supported vertical-slice boundary
+
+The initial fast path needs only the features exercised by `single_item`:
+
+- The benchmark operation and its scalar arguments.
+- Object selections, scalar leaves, lists, and non-null wrappers.
+- Source-only and synchronous resolver thunks.
+- Required scalar serialization, null propagation, error capture, and public `Map` output.
+
+It must still perform every parse, validation, execution, completion, and materialization step
+required by the shared benchmark contract. Query caching, omitted validation, or returning an
+internal result instead of the public result are not acceptable unless the Rust benchmark performs
+the identical work.
+
+#### Implementation shape
+
+1. Resolve compact parser source ranges directly to numeric type and field IDs in one schema-aware
+   traversal; do not construct the Engine V1 AST or generic validation visitor graph.
+2. Emit contiguous field-plan records containing the resolver form, response-name ID, output type
+   shape, scalar completion operation, output slot, and child-plan range.
+3. Run a synchronous opcode-like executor. Do not construct empty argument maps,
+   `GraphQLResolveInfo`, `[Field]`, `IndexPath`, fragment dictionaries, or Swift concurrency state
+   machines when the selected resolver cannot observe them.
+4. Execute one precompiled child-plan range for every list element rather than recollecting fields
+   or allocating per-item plans.
+5. Write completion results into a preallocated arena, then convert that arena once to the existing
+   public `Map` representation. Keep error construction and path materialization on the cold path.
+6. Profile release builds for allocations, ARC, existential casts, throwing closure calls, scalar
+   conversion, and result conversion before changing the resolver ABI further.
+
+#### Performance budget and investment gates
+
+The reference Rust `single_item` baseline is 7.79 us, so matching within 10% means at most 8.57 us
+on the same machine and benchmark contract.
+
+| Component | Initial target |
+| --- | ---: |
+| Parse | 0.50 us |
+| Fused validation and plan compilation | 1.50 us |
+| Resolve and complete | 3.50 us |
+| Public result materialization | 1.50 us |
+| Remaining overhead | 0.80 us |
+| Total | 7.80 us |
+
+The first investment gate is at most 15.58 us, or 2x Rust, for the complete vertical slice. Reaching
+that gate demonstrates that the architecture is viable enough to justify completeness work. The
+primary gate remains 8.57 us. If the restricted path remains above 2x Rust after component timing
+and two profile-driven bottleneck passes, stop and present the evidence before committing more
+resources to feature breadth.
+
+After `single_item`, optimize in this order:
+
+1. `list_items`, proving child-plan reuse and allocation control.
+2. `invalid_field` and `invalid_type`, using the fused validation failure path.
+3. `malformed_query`, retaining the already-fast compact parser and public error adaptation.
+4. `introspection`, only after ordinary execution demonstrates competitive performance.
 
 ## Phase 0: Baseline and Contracts
 
