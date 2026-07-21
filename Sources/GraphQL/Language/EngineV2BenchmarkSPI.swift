@@ -22,20 +22,113 @@ public func engineV2PublicParseError(
 ) -> GraphQLError {
     let source = Source(body: body)
     if let error = error as? FastParseError {
-        return syntaxError(
+        return fastSyntaxError(
             source: source,
             position: Int(error.position),
             description: fastParseErrorDescription(error, source: body)
         )
     }
     if let error = error as? FastLexError {
-        return syntaxError(
+        return fastSyntaxError(
             source: source,
             position: Int(error.position),
             description: fastLexErrorDescription(error)
         )
     }
     return GraphQLError(message: String(describing: error))
+}
+
+private func fastSyntaxError(
+    source: Source,
+    position: Int,
+    description: String
+) -> GraphQLError {
+    let bytes = source.body.utf8
+    let location = fastSourceLocation(source: source.body, position: position)
+    let highlight = fastSourceHighlight(bytes: bytes, location: location)
+    let message = "Syntax Error \(source.name) (\(location.line):\(location.column)) " +
+        description + "\n\n" + highlight
+    return GraphQLError(
+        syntaxMessage: message,
+        source: source,
+        position: position,
+        location: location
+    )
+}
+
+private func fastSourceLocation(
+    source: String,
+    position: Int
+) -> SourceLocation {
+    var line = 1
+    var column = position + 1
+    var offset = 0
+    var index = source.utf16.startIndex
+    while index != source.utf16.endIndex {
+        let codeUnit = source.utf16[index]
+        source.utf16.formIndex(after: &index)
+        let newlineStart = offset
+        offset += 1
+        if codeUnit == 0x000D {
+            if index != source.utf16.endIndex, source.utf16[index] == 0x000A {
+                source.utf16.formIndex(after: &index)
+                offset += 1
+            }
+        } else if codeUnit != 0x000A {
+            continue
+        }
+        if newlineStart < position {
+            line += 1
+            column = position + 1 - offset
+        }
+    }
+    return SourceLocation(line: line, column: column)
+}
+
+private func fastSourceHighlight<Bytes>(
+    bytes: Bytes,
+    location: SourceLocation
+) -> String where Bytes: Collection, Bytes.Element == UInt8 {
+    var ranges: [Range<Bytes.Index>] = []
+    ranges.reserveCapacity(3)
+    var line = 1
+    var lineStart = bytes.startIndex
+    var index = bytes.startIndex
+
+    while index != bytes.endIndex, line <= location.line + 1 {
+        let byte = bytes[index]
+        if byte == 0x0A || byte == 0x0D {
+            if line >= location.line - 1 { ranges.append(lineStart ..< index) }
+            bytes.formIndex(after: &index)
+            if byte == 0x0D, index != bytes.endIndex, bytes[index] == 0x0A {
+                bytes.formIndex(after: &index)
+            }
+            line += 1
+            lineStart = index
+        } else {
+            bytes.formIndex(after: &index)
+        }
+    }
+    if line <= location.line + 1, line >= location.line - 1 {
+        ranges.append(lineStart ..< bytes.endIndex)
+    }
+
+    let firstLineNumber = max(location.line - 1, 1)
+    let padLength = String(location.line + 1).count
+    var result = ""
+    for (offset, range) in ranges.enumerated() {
+        let lineNumber = firstLineNumber + offset
+        result += fastLeftPad(padLength, String(lineNumber)) + ": " +
+            String(decoding: bytes[range], as: UTF8.self) + "\n"
+        if lineNumber == location.line {
+            result += String(repeating: " ", count: max(2 + padLength + location.column, 0)) + "^\n"
+        }
+    }
+    return result
+}
+
+private func fastLeftPad(_ length: Int, _ string: String) -> String {
+    String(repeating: " ", count: max(length - string.count + 1, 0)) + string
 }
 
 private func fastParseErrorDescription(_ error: FastParseError, source: String) -> String {

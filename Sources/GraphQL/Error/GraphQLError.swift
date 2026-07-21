@@ -119,6 +119,24 @@ public struct GraphQLError: Error, Codable {
         originalError = nil
     }
 
+    /// Internal syntax-error initializer for callers that already computed the source location.
+    /// Avoids rescanning the complete source in the general initializer.
+    init(
+        syntaxMessage message: String,
+        source: Source,
+        position: Int,
+        location: SourceLocation
+    ) {
+        self.message = message
+        locations = [location]
+        path = []
+        extensions = [:]
+        nodes = []
+        self.source = source
+        positions = [position]
+        originalError = nil
+    }
+
     public init(_ error: Error) {
         self.init(
             message: error.localizedDescription,

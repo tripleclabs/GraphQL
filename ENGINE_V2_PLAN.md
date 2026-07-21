@@ -221,6 +221,20 @@ The compact parser is 13.6x faster at identifying the failure, but existing high
 construction adds approximately 2.88 us and now dominates the Engine V2 malformed path. Public
 error formatting must therefore receive its own optimization work before end-to-end cutover.
 
+Follow-up optimization replaced the regular-expression source scans at the Engine V2 adapter with
+a single-pass formatter and a precomputed-location `GraphQLError` initializer. Exact public parity
+coverage now includes CRLF input and Unicode before the failure as well as the original cases.
+
+| Optimized malformed parser boundary | Median |
+| --- | ---: |
+| Engine V1 public parser failure | 4,369.17 ns |
+| Engine V2 raw parser failure | 309.86 ns |
+| Engine V2 with public `GraphQLError` | 1,114.14 ns |
+
+Public error materialization now adds approximately 804 ns instead of 2.88 us. This measurement is
+below the current 2.52 us Rust end-to-end malformed-query baseline, but Engine V2 is not connected
+to the complete request path yet, so it is not an end-to-end victory claim.
+
 ### 2026-07-21: Lazy string-value decoding
 
 - Added on-demand decoding for ordinary and block string values without adding allocated strings

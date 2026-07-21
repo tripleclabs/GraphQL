@@ -84,6 +84,7 @@ import Testing
         "{",
         "query Broken { field",
         "notanoperation Foo { field }",
+        "query Broken {\r\n  field(arg: \"☃\")\r\n  nested { value\r\n",
     ])
     func adaptedPublicErrorsMatchReference(source: String) throws {
         let reference = try capturedGraphQLError {
