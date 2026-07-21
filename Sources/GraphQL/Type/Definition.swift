@@ -356,7 +356,10 @@ public final class GraphQLObjectType: @unchecked Sendable {
     }
 
     func getFields() throws -> GraphQLFieldDefinitionMap {
-        if let cached = cacheQueue.sync(execute: { fieldCache }) {
+        // GraphQLSchema materializes every reachable type before execution. The documented
+        // execution-time contract makes this cache immutable, so avoid the global queue on the
+        // overwhelmingly common read path.
+        if let cached = fieldCache {
             return cached
         }
         let fields = try defineFieldMap(
@@ -374,7 +377,7 @@ public final class GraphQLObjectType: @unchecked Sendable {
     }
 
     func getInterfaces() throws -> [GraphQLInterfaceType] {
-        if let cached = cacheQueue.sync(execute: { interfaceCache }) {
+        if let cached = interfaceCache {
             return cached
         }
         let interfaces = try interfaces()
@@ -418,6 +421,9 @@ func defineFieldMap(name: String, fields: GraphQLFieldMap) throws -> GraphQLFiel
             deprecationReason: config.deprecationReason,
             args: defineArgumentMap(args: config.args),
             resolve: config.resolve,
+            synchronousResolve: config.synchronousResolve,
+            fastResolve: config.fastResolve,
+            fastResolveIsComplete: config.fastResolveIsComplete,
             subscribe: config.subscribe,
             astNode: config.astNode
         )
@@ -492,6 +498,10 @@ public typealias GraphQLFieldResolveInput = @Sendable (
     _ info: GraphQLResolveInfo
 ) throws -> (any Sendable)?
 
+public typealias GraphQLFieldFastResolve = @Sendable (
+    _ source: any Sendable
+) throws -> (any Sendable)?
+
 public struct GraphQLResolveInfo: Sendable {
     public let fieldName: String
     public let fieldASTs: [Field]
@@ -523,6 +533,9 @@ public final class GraphQLField: @unchecked Sendable {
     }
 
     private var _resolve: GraphQLFieldResolve?
+    public let synchronousResolve: GraphQLFieldResolveInput?
+    public let fastResolve: GraphQLFieldFastResolve?
+    public let fastResolveIsComplete: Bool
 
     public var subscribe: GraphQLFieldResolve? {
         get {
@@ -550,6 +563,9 @@ public final class GraphQLField: @unchecked Sendable {
         self.description = description
         self.astNode = astNode
         _resolve = nil
+        synchronousResolve = nil
+        fastResolve = nil
+        fastResolveIsComplete = false
         _subscribe = nil
     }
 
@@ -568,6 +584,9 @@ public final class GraphQLField: @unchecked Sendable {
         self.description = description
         self.astNode = astNode
         _resolve = resolve
+        synchronousResolve = nil
+        fastResolve = nil
+        fastResolveIsComplete = false
         _subscribe = subscribe
     }
 
@@ -585,9 +604,33 @@ public final class GraphQLField: @unchecked Sendable {
         self.description = description
         self.astNode = astNode
 
+        synchronousResolve = resolve
+        fastResolve = nil
+        fastResolveIsComplete = false
         _resolve = { source, args, context, info in
             try resolve(source, args, context, info)
         }
+        _subscribe = nil
+    }
+
+    public init(
+        type: GraphQLOutputType,
+        description: String? = nil,
+        deprecationReason: String? = nil,
+        args: GraphQLArgumentConfigMap = [:],
+        astNode: FieldDefinition? = nil,
+        fastResolveIsComplete: Bool = false,
+        fastResolve: @escaping GraphQLFieldFastResolve
+    ) {
+        self.type = type
+        self.args = args
+        self.deprecationReason = deprecationReason
+        self.description = description
+        self.astNode = astNode
+        _resolve = nil
+        synchronousResolve = nil
+        self.fastResolve = fastResolve
+        self.fastResolveIsComplete = fastResolveIsComplete
         _subscribe = nil
     }
 }
@@ -600,6 +643,9 @@ public final class GraphQLFieldDefinition: Sendable {
     public let type: GraphQLOutputType
     public let args: [GraphQLArgumentDefinition]
     public let resolve: GraphQLFieldResolve?
+    public let synchronousResolve: GraphQLFieldResolveInput?
+    public let fastResolve: GraphQLFieldFastResolve?
+    public let fastResolveIsComplete: Bool
     public let subscribe: GraphQLFieldResolve?
     public let deprecationReason: String?
     public let isDeprecated: Bool
@@ -612,6 +658,9 @@ public final class GraphQLFieldDefinition: Sendable {
         deprecationReason: String? = nil,
         args: [GraphQLArgumentDefinition] = [],
         resolve: GraphQLFieldResolve?,
+        synchronousResolve: GraphQLFieldResolveInput? = nil,
+        fastResolve: GraphQLFieldFastResolve? = nil,
+        fastResolveIsComplete: Bool = false,
         subscribe: GraphQLFieldResolve? = nil,
         astNode: FieldDefinition? = nil
     ) {
@@ -620,6 +669,9 @@ public final class GraphQLFieldDefinition: Sendable {
         self.type = type
         self.args = args
         self.resolve = resolve
+        self.synchronousResolve = synchronousResolve
+        self.fastResolve = fastResolve
+        self.fastResolveIsComplete = fastResolveIsComplete
         self.subscribe = subscribe
         self.deprecationReason = deprecationReason
         isDeprecated = deprecationReason != nil
@@ -627,6 +679,27 @@ public final class GraphQLFieldDefinition: Sendable {
     }
 
     func toField() -> GraphQLField {
+        if let fastResolve {
+            return .init(
+                type: type,
+                description: description,
+                deprecationReason: deprecationReason,
+                args: argConfigMap(),
+                astNode: astNode,
+                fastResolveIsComplete: fastResolveIsComplete,
+                fastResolve: fastResolve
+            )
+        }
+        if let synchronousResolve {
+            return .init(
+                type: type,
+                description: description,
+                deprecationReason: deprecationReason,
+                args: argConfigMap(),
+                astNode: astNode,
+                resolve: synchronousResolve
+            )
+        }
         return .init(
             type: type,
             description: description,
@@ -812,7 +885,7 @@ public final class GraphQLInterfaceType: @unchecked Sendable {
     }
 
     func getFields() throws -> GraphQLFieldDefinitionMap {
-        if let cached = cacheQueue.sync(execute: { fieldCache }) {
+        if let cached = fieldCache {
             return cached
         }
         let fields = try defineFieldMap(
@@ -830,7 +903,7 @@ public final class GraphQLInterfaceType: @unchecked Sendable {
     }
 
     func getInterfaces() throws -> [GraphQLInterfaceType] {
-        if let cached = cacheQueue.sync(execute: { interfaceCache }) {
+        if let cached = interfaceCache {
             return cached
         }
         let interfaces = try interfaces()

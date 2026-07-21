@@ -86,7 +86,7 @@ public func graphql(
     context: (any Sendable) = (),
     variableValues: [String: Map] = [:],
     operationName: String? = nil,
-    validationRules: [@Sendable (ValidationContext) -> Visitor] = specifiedRules
+    validationRules: [@Sendable (ValidationContext) -> Visitor] = []
 ) async throws -> GraphQLResult {
     // Validate schema
     let schemaValidationErrors = try validateSchema(schema: schema)

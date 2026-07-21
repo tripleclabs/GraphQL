@@ -1,15 +1,19 @@
+private protocol OptionalValue {
+    var wrappedValue: Any? { get }
+}
+
+extension Optional: OptionalValue {
+    fileprivate var wrappedValue: Any? {
+        self
+    }
+}
+
 func unwrap(_ value: any Sendable) -> (any Sendable)? {
-    let mirror = Mirror(reflecting: value)
-
-    if mirror.displayStyle != .optional {
-        return value
+    if let optional = value as? any OptionalValue {
+        return optional.wrappedValue.map(assumeSendable)
     }
 
-    guard let child = mirror.children.first else {
-        return nil
-    }
-
-    return assumeSendable(child.value)
+    return value
 }
 
 extension Mirror {

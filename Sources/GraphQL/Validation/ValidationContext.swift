@@ -245,6 +245,47 @@ public final class ValidationContext: ASTValidationContext {
         return usages
     }
 
+    /// Records variable usages during the validation traversal that is already in progress. The
+    /// original implementation launched another type-aware AST visitor from the variable rules,
+    /// even for the overwhelmingly common operation with no variables.
+    func variableUsageRecordingVisitor() -> Visitor {
+        var currentSelectionSet: HasSelectionSet?
+        var variableDefinitionDepth = 0
+        return Visitor(
+            enter: { node, _, _, _, _ in
+                if let operation = node as? OperationDefinition {
+                    currentSelectionSet = .operation(operation)
+                    self.variableUsages[currentSelectionSet!] = []
+                } else if let fragment = node as? FragmentDefinition {
+                    currentSelectionSet = .fragment(fragment)
+                    self.variableUsages[currentSelectionSet!] = []
+                } else if node is VariableDefinition {
+                    variableDefinitionDepth += 1
+                } else if let variable = node as? Variable,
+                          variableDefinitionDepth == 0,
+                          let currentSelectionSet
+                {
+                    self.variableUsages[currentSelectionSet, default: []].append(
+                        VariableUsage(
+                            node: variable,
+                            type: self.typeInfo.inputType,
+                            defaultValue: self.typeInfo.defaultValue
+                        )
+                    )
+                }
+                return .continue
+            },
+            leave: { node, _, _, _, _ in
+                if node is VariableDefinition {
+                    variableDefinitionDepth -= 1
+                } else if node is OperationDefinition || node is FragmentDefinition {
+                    currentSelectionSet = nil
+                }
+                return .continue
+            }
+        )
+    }
+
     public var type: GraphQLOutputType? {
         return typeInfo.type
     }

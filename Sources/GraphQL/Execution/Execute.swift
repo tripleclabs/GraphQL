@@ -1,4 +1,5 @@
 import Dispatch
+import Foundation
 import OrderedCollections
 
 /*
@@ -28,7 +29,7 @@ import OrderedCollections
  * and the fragments defined in the query document
  */
 public final class ExecutionContext: @unchecked Sendable {
-    let queryStrategy: QueryFieldExecutionStrategy = ConcurrentFieldExecutionStrategy()
+    let queryStrategy: QueryFieldExecutionStrategy = SerialFieldExecutionStrategy()
     let mutationStrategy: MutationFieldExecutionStrategy = SerialFieldExecutionStrategy()
     let subscriptionStrategy: SubscriptionFieldExecutionStrategy =
         ConcurrentFieldExecutionStrategy()
@@ -40,6 +41,8 @@ public final class ExecutionContext: @unchecked Sendable {
     public let variableValues: [String: Map]
 
     private var _errors: [GraphQLError]
+    private var collectedFieldsCache: [CollectedFieldsCacheKey: OrderedDictionary<String, [Field]>] = [:]
+    private let collectedFieldsCacheLock = NSLock()
     private let errorsQueue = DispatchQueue(
         label: "graphql.schema.validationerrors",
         attributes: .concurrent
@@ -84,6 +87,39 @@ public final class ExecutionContext: @unchecked Sendable {
             self._errors.append(error)
         }
     }
+
+    func collectedFields(
+        runtimeType: GraphQLObjectType,
+        selectionSet: SelectionSet
+    ) throws -> OrderedDictionary<String, [Field]> {
+        collectedFieldsCacheLock.lock()
+        defer { collectedFieldsCacheLock.unlock() }
+
+        let key = CollectedFieldsCacheKey(
+            runtimeType: ObjectIdentifier(runtimeType),
+            selectionSet: ObjectIdentifier(selectionSet)
+        )
+        if let cached = collectedFieldsCache[key] {
+            return cached
+        }
+
+        var fields: OrderedDictionary<String, [Field]> = [:]
+        var visitedFragmentNames: [String: Bool] = [:]
+        let collected = try collectFields(
+            exeContext: self,
+            runtimeType: runtimeType,
+            selectionSet: selectionSet,
+            fields: &fields,
+            visitedFragmentNames: &visitedFragmentNames
+        )
+        collectedFieldsCache[key] = collected
+        return collected
+    }
+}
+
+private struct CollectedFieldsCacheKey: Hashable {
+    let runtimeType: ObjectIdentifier
+    let selectionSet: ObjectIdentifier
 }
 
 public protocol FieldExecutionStrategy: Sendable {
@@ -93,7 +129,7 @@ public protocol FieldExecutionStrategy: Sendable {
         sourceValue: any Sendable,
         path: IndexPath,
         fields: OrderedDictionary<String, [Field]>
-    ) async throws -> OrderedDictionary<String, any Sendable>
+    ) async throws -> OrderedDictionary<String, Map>
 }
 
 public protocol MutationFieldExecutionStrategy: FieldExecutionStrategy {}
@@ -114,8 +150,8 @@ public struct SerialFieldExecutionStrategy: QueryFieldExecutionStrategy,
         sourceValue: any Sendable,
         path: IndexPath,
         fields: OrderedDictionary<String, [Field]>
-    ) async throws -> OrderedDictionary<String, any Sendable> {
-        var results = OrderedDictionary<String, any Sendable>()
+    ) async throws -> OrderedDictionary<String, Map> {
+        var results = OrderedDictionary<String, Map>()
         for field in fields {
             let fieldASTs = field.value
             let fieldPath = path.appending(field.key)
@@ -145,11 +181,10 @@ public struct ConcurrentFieldExecutionStrategy: QueryFieldExecutionStrategy,
         sourceValue: any Sendable,
         path: IndexPath,
         fields: OrderedDictionary<String, [Field]>
-    ) async throws -> OrderedDictionary<String, any Sendable> {
-        return try await withThrowingTaskGroup(of: (String, (any Sendable)?).self) { group in
+    ) async throws -> OrderedDictionary<String, Map> {
+        return try await withThrowingTaskGroup(of: (String, Map).self) { group in
             // preserve field order by assigning to null and filtering later
-            var results: OrderedDictionary<String, (any Sendable)?> = fields
-                .mapValues { _ -> Any? in nil }
+            var results: OrderedDictionary<String, Map> = fields.mapValues { _ in .null }
             for field in fields {
                 group.addTask {
                     let fieldASTs = field.value
@@ -167,7 +202,7 @@ public struct ConcurrentFieldExecutionStrategy: QueryFieldExecutionStrategy,
             for try await result in group {
                 results[result.0] = result.1
             }
-            return results.compactMapValues { $0 }
+            return results
         }
     }
 }
@@ -212,13 +247,7 @@ public func execute(
             operation: buildContext.operation,
             rootValue: rootValue
         )
-        var dataMap: Map = [:]
-
-        for (key, value) in data {
-            dataMap[key] = try map(from: value)
-        }
-
-        var result: GraphQLResult = .init(data: dataMap)
+        var result: GraphQLResult = .init(data: .dictionary(data))
 
         if !buildContext.errors.isEmpty {
             result.errors = buildContext.errors
@@ -307,7 +336,7 @@ func executeOperation(
     exeContext: ExecutionContext,
     operation: OperationDefinition,
     rootValue: any Sendable
-) async throws -> OrderedDictionary<String, any Sendable> {
+) async throws -> OrderedDictionary<String, Map> {
     let type = try getOperationRootType(schema: exeContext.schema, operation: operation)
     var inputFields: OrderedDictionary<String, [Field]> = [:]
     var visitedFragmentNames: [String: Bool] = [:]
@@ -324,8 +353,34 @@ func executeOperation(
 
     switch operation.operation {
     case .query:
+        if let plan = try buildSynchronousPlan(
+            exeContext: exeContext,
+            parentType: type,
+            fields: fields
+        ) {
+            return try executeFieldsSynchronously(
+                exeContext: exeContext,
+                parentType: type,
+                sourceValue: rootValue,
+                path: [],
+                plan: plan
+            )
+        }
         fieldExecutionStrategy = exeContext.queryStrategy
     case .mutation:
+        if let plan = try buildSynchronousPlan(
+            exeContext: exeContext,
+            parentType: type,
+            fields: fields
+        ) {
+            return try executeFieldsSynchronously(
+                exeContext: exeContext,
+                parentType: type,
+                sourceValue: rootValue,
+                path: [],
+                plan: plan
+            )
+        }
         fieldExecutionStrategy = exeContext.mutationStrategy
     case .subscription:
         fieldExecutionStrategy = exeContext.subscriptionStrategy
@@ -337,6 +392,437 @@ func executeOperation(
         sourceValue: rootValue,
         path: [],
         fields: fields
+    )
+}
+
+/// Returns true only when the complete selection can be resolved without entering an async
+/// resolver. This read-only preflight lets ordinary key-path and synchronous Graphiti schemas use
+/// a completion engine with no Swift concurrency state machines, while preserving the async path
+/// for mixed and genuinely asynchronous schemas.
+private struct SynchronousFieldPlan {
+    let responseName: String
+    let fieldASTs: [Field]
+    let fieldDefinition: GraphQLFieldDefinition
+    let children: [SynchronousFieldPlan]?
+}
+
+private func buildSynchronousPlan(
+    exeContext: ExecutionContext,
+    parentType: GraphQLObjectType,
+    fields: OrderedDictionary<String, [Field]>
+) throws -> [SynchronousFieldPlan]? {
+    var plan: [SynchronousFieldPlan] = []
+    plan.reserveCapacity(fields.count)
+    for (responseName, fieldASTs) in fields {
+        let fieldName = fieldASTs[0].name.value
+        let fieldDef = try getFieldDef(
+            schema: exeContext.schema,
+            parentType: parentType,
+            fieldName: fieldName
+        )
+        if fieldDef.synchronousResolve == nil, fieldDef.resolve != nil {
+            return nil
+        }
+
+        var children: [SynchronousFieldPlan]?
+        guard let objectType = objectType(from: fieldDef.type) else {
+            if containsAbstractType(fieldDef.type) {
+                return nil
+            }
+            plan.append(.init(
+                responseName: responseName,
+                fieldASTs: fieldASTs,
+                fieldDefinition: fieldDef,
+                children: nil
+            ))
+            continue
+        }
+        let subfields = try collectSubfields(
+            exeContext: exeContext,
+            runtimeType: objectType,
+            fieldASTs: fieldASTs
+        )
+        guard let childPlan = try buildSynchronousPlan(
+            exeContext: exeContext,
+            parentType: objectType,
+            fields: subfields
+        ) else { return nil }
+        children = childPlan
+        plan.append(.init(
+            responseName: responseName,
+            fieldASTs: fieldASTs,
+            fieldDefinition: fieldDef,
+            children: children
+        ))
+    }
+    return plan
+}
+
+private func objectType(from type: GraphQLType) -> GraphQLObjectType? {
+    if let nonNull = type as? GraphQLNonNull {
+        return objectType(from: nonNull.ofType)
+    }
+    if let list = type as? GraphQLList {
+        return objectType(from: list.ofType)
+    }
+    return type as? GraphQLObjectType
+}
+
+private func containsAbstractType(_ type: GraphQLType) -> Bool {
+    if let nonNull = type as? GraphQLNonNull {
+        return containsAbstractType(nonNull.ofType)
+    }
+    if let list = type as? GraphQLList {
+        return containsAbstractType(list.ofType)
+    }
+    return type is GraphQLAbstractType
+}
+
+private func collectSubfields(
+    exeContext: ExecutionContext,
+    runtimeType: GraphQLObjectType,
+    fieldASTs: [Field]
+) throws -> OrderedDictionary<String, [Field]> {
+    if fieldASTs.count == 1, let selectionSet = fieldASTs[0].selectionSet {
+        return try exeContext.collectedFields(runtimeType: runtimeType, selectionSet: selectionSet)
+    }
+
+    var collected: OrderedDictionary<String, [Field]> = [:]
+    var visitedFragmentNames: [String: Bool] = [:]
+    for fieldAST in fieldASTs {
+        if let selectionSet = fieldAST.selectionSet {
+            collected = try collectFields(
+                exeContext: exeContext,
+                runtimeType: runtimeType,
+                selectionSet: selectionSet,
+                fields: &collected,
+                visitedFragmentNames: &visitedFragmentNames
+            )
+        }
+    }
+    return collected
+}
+
+private func executeFieldsSynchronously(
+    exeContext: ExecutionContext,
+    parentType: GraphQLObjectType,
+    sourceValue: any Sendable,
+    path: IndexPath,
+    plan: [SynchronousFieldPlan]
+) throws -> OrderedDictionary<String, Map> {
+    var results = OrderedDictionary<String, Map>(minimumCapacity: plan.count)
+    for field in plan {
+        results[field.responseName] = try resolveFieldSynchronously(
+            exeContext: exeContext,
+            parentType: parentType,
+            source: sourceValue,
+            field: field,
+            parentPath: path
+        ) ?? .null
+    }
+    return results
+}
+
+private func resolveFieldSynchronously(
+    exeContext: ExecutionContext,
+    parentType: GraphQLObjectType,
+    source: any Sendable,
+    field: SynchronousFieldPlan,
+    parentPath: IndexPath
+) throws -> Map? {
+    let fieldASTs = field.fieldASTs
+    let fieldAST = fieldASTs[0]
+    let fieldName = fieldAST.name.value
+    let fieldDef = field.fieldDefinition
+    if fieldDef.fastResolveIsComplete, let fastResolve = fieldDef.fastResolve {
+        do {
+            guard let resolved = try fastResolve(source), let completed = resolved as? Map else {
+                throw GraphQLError(
+                    message: "Cannot return null for non-nullable field \(parentType.name).\(fieldName)."
+                )
+            }
+            return completed
+        } catch {
+            throw locatedError(
+                originalError: error,
+                nodes: fieldASTs,
+                path: parentPath.appending(field.responseName)
+            )
+        }
+    }
+    if parentType.name.hasPrefix("__") {
+        if fieldName == "name", let name = introspectionName(source) {
+            return .string(name)
+        }
+        if fieldName == "kind", let kind = introspectionKind(source) {
+            return .string(kind.rawValue)
+        }
+        if fieldName == "locations", let directive = source as? GraphQLDirective {
+            return .array(directive.locations.map { .string($0.rawValue) })
+        }
+    }
+    let path = parentPath.appending(field.responseName)
+    let args: Map
+    if fieldDef.args.isEmpty, fieldAST.arguments.isEmpty {
+        args = [:]
+    } else {
+        args = try getArgumentValues(
+            argDefs: fieldDef.args,
+            argASTs: fieldAST.arguments,
+            variables: exeContext.variableValues
+        )
+    }
+    let info: GraphQLResolveInfo? = fieldDef.fastResolve == nil
+        ? makeResolveInfo(
+            exeContext: exeContext,
+            fieldName: fieldName,
+            fieldASTs: fieldASTs,
+            returnType: fieldDef.type,
+            parentType: parentType,
+            path: path
+        )
+        : nil
+    let result: Result<(any Sendable)?, Error>
+    if let fastResolve = fieldDef.fastResolve {
+        do {
+            result = .success(try fastResolve(source))
+        } catch {
+            result = .failure(error)
+        }
+    } else {
+        result = resolveOrError(
+            resolve: fieldDef.synchronousResolve ?? defaultResolve,
+            source: source,
+            args: args,
+            context: exeContext.context,
+            info: info!
+        )
+    }
+    return try completeValueCatchingErrorSynchronously(
+        exeContext: exeContext,
+        returnType: fieldDef.type,
+        fieldASTs: fieldASTs,
+        info: info,
+        parentType: parentType,
+        fieldName: fieldName,
+        path: path,
+        result: result,
+        childPlan: field.children
+    )
+}
+
+private func introspectionName(_ source: any Sendable) -> String? {
+    if let value = source as? GraphQLNamedType { return value.name }
+    if let value = source as? GraphQLFieldDefinition { return value.name }
+    if let value = source as? GraphQLArgumentDefinition { return value.name }
+    if let value = source as? GraphQLDirective { return value.name }
+    if let value = source as? GraphQLEnumValueDefinition { return value.name }
+    if let value = source as? InputObjectFieldDefinition { return value.name }
+    return nil
+}
+
+private func introspectionKind(_ source: any Sendable) -> TypeKind? {
+    switch source {
+    case is GraphQLScalarType: return .scalar
+    case is GraphQLObjectType: return .object
+    case is GraphQLInterfaceType: return .interface
+    case is GraphQLUnionType: return .union
+    case is GraphQLEnumType: return .enum
+    case is GraphQLInputObjectType: return .inputObject
+    case is GraphQLList: return .list
+    case is GraphQLNonNull: return .nonNull
+    default: return nil
+    }
+}
+
+private func completeValueCatchingErrorSynchronously(
+    exeContext: ExecutionContext,
+    returnType: GraphQLType,
+    fieldASTs: [Field],
+    info: GraphQLResolveInfo?,
+    parentType: GraphQLObjectType,
+    fieldName: String,
+    path: IndexPath,
+    result: Result<(any Sendable)?, Error>,
+    childPlan: [SynchronousFieldPlan]?
+) throws -> Map? {
+    if returnType is GraphQLNonNull {
+        return try completeValueWithLocatedErrorSynchronously(
+            exeContext: exeContext,
+            returnType: returnType,
+            fieldASTs: fieldASTs,
+            info: info,
+            parentType: parentType,
+            fieldName: fieldName,
+            path: path,
+            result: result,
+            childPlan: childPlan
+        )
+    }
+    do {
+        return try completeValueWithLocatedErrorSynchronously(
+            exeContext: exeContext,
+            returnType: returnType,
+            fieldASTs: fieldASTs,
+            info: info,
+            parentType: parentType,
+            fieldName: fieldName,
+            path: path,
+            result: result,
+            childPlan: childPlan
+        )
+    } catch let error as GraphQLError {
+        exeContext.append(error: error)
+        return nil
+    }
+}
+
+private func completeValueWithLocatedErrorSynchronously(
+    exeContext: ExecutionContext,
+    returnType: GraphQLType,
+    fieldASTs: [Field],
+    info: GraphQLResolveInfo?,
+    parentType: GraphQLObjectType,
+    fieldName: String,
+    path: IndexPath,
+    result: Result<(any Sendable)?, Error>,
+    childPlan: [SynchronousFieldPlan]?
+) throws -> Map? {
+    do {
+        return try completeValueSynchronously(
+            exeContext: exeContext,
+            returnType: returnType,
+            fieldASTs: fieldASTs,
+            info: info,
+            parentType: parentType,
+            fieldName: fieldName,
+            path: path,
+            result: result,
+            childPlan: childPlan
+        )
+    } catch {
+        throw locatedError(originalError: error, nodes: fieldASTs, path: path)
+    }
+}
+
+private func completeValueSynchronously(
+    exeContext: ExecutionContext,
+    returnType: GraphQLType,
+    fieldASTs: [Field],
+    info: GraphQLResolveInfo?,
+    parentType: GraphQLObjectType,
+    fieldName: String,
+    path: IndexPath,
+    result: Result<(any Sendable)?, Error>,
+    childPlan: [SynchronousFieldPlan]?
+) throws -> Map? {
+    let resolved: (any Sendable)?
+    switch result {
+    case let .failure(error):
+        throw error
+    case let .success(value):
+        resolved = value
+    }
+
+    if let nonNull = returnType as? GraphQLNonNull {
+        let value = try completeValueSynchronously(
+            exeContext: exeContext,
+            returnType: nonNull.ofType,
+            fieldASTs: fieldASTs,
+            info: info,
+            parentType: parentType,
+            fieldName: fieldName,
+            path: path,
+            result: .success(resolved),
+            childPlan: childPlan
+        )
+        guard let value else {
+            throw GraphQLError(
+                message: "Cannot return null for non-nullable field \(parentType.name).\(fieldName)."
+            )
+        }
+        return value
+    }
+
+    guard let resolved, let value = unwrap(resolved) else {
+        return nil
+    }
+    if let list = returnType as? GraphQLList {
+        guard let items = value as? [(any Sendable)?] else {
+            throw GraphQLError(
+                message: "Expected array, but did not find one for field \(parentType.name).\(fieldName)."
+            )
+        }
+        var completed = [Map]()
+        completed.reserveCapacity(items.count)
+        for (index, item) in items.enumerated() {
+            completed.append(try completeValueCatchingErrorSynchronously(
+                exeContext: exeContext,
+                returnType: list.ofType,
+                fieldASTs: fieldASTs,
+                info: info,
+                parentType: parentType,
+                fieldName: fieldName,
+                path: path.appending(index),
+                result: .success(item),
+                childPlan: childPlan
+            ) ?? .null)
+        }
+        return .array(completed)
+    }
+    if let leaf = returnType as? GraphQLLeafType {
+        return try completeLeafValue(returnType: leaf, result: value)
+    }
+    guard let object = returnType as? GraphQLObjectType else {
+        throw GraphQLError(message: "Cannot synchronously complete value of type \(returnType).")
+    }
+    if let isTypeOf = object.isTypeOf {
+        let resolveInfo = info ?? makeResolveInfo(
+            exeContext: exeContext,
+            fieldName: fieldName,
+            fieldASTs: fieldASTs,
+            returnType: returnType as! GraphQLOutputType,
+            parentType: parentType,
+            path: path
+        )
+        if try !isTypeOf(value, resolveInfo) {
+        throw GraphQLError(
+            message: "Expected value of type \"\(object.name)\" but got: \(value).",
+            nodes: fieldASTs
+        )
+        }
+    }
+    guard let childPlan else {
+        throw GraphQLError(message: "Missing synchronous plan for object type \(object.name).")
+    }
+    return .dictionary(try executeFieldsSynchronously(
+        exeContext: exeContext,
+        parentType: object,
+        sourceValue: value,
+        path: path,
+        plan: childPlan
+    ))
+}
+
+private func makeResolveInfo(
+    exeContext: ExecutionContext,
+    fieldName: String,
+    fieldASTs: [Field],
+    returnType: GraphQLOutputType,
+    parentType: GraphQLObjectType,
+    path: IndexPath
+) -> GraphQLResolveInfo {
+    GraphQLResolveInfo(
+        fieldName: fieldName,
+        fieldASTs: fieldASTs,
+        returnType: returnType,
+        parentType: parentType,
+        path: path,
+        schema: exeContext.schema,
+        fragments: exeContext.fragments,
+        rootValue: exeContext.rootValue,
+        operation: exeContext.operation,
+        variableValues: exeContext.variableValues
     )
 }
 
@@ -570,7 +1056,7 @@ public func resolveField(
     source: any Sendable,
     fieldASTs: [Field],
     path: IndexPath
-) async throws -> (any Sendable)? {
+) async throws -> Map? {
     let fieldAST = fieldASTs[0]
     let fieldName = fieldAST.name.value
 
@@ -581,16 +1067,23 @@ public func resolveField(
     )
 
     let returnType = fieldDef.type
-    let resolve = fieldDef.resolve ?? defaultResolve
+    let fastResolve = fieldDef.fastResolve
+    let synchronousResolve = fieldDef.synchronousResolve
+    let resolve = fieldDef.resolve
 
     // Build a Map object of arguments from the field.arguments AST, using the
     // variables scope to fulfill any variable references.
     // TODO: find a way to memoize, in case this field is within a List type.
-    let args = try getArgumentValues(
-        argDefs: fieldDef.args,
-        argASTs: fieldAST.arguments,
-        variables: exeContext.variableValues
-    )
+    let args: Map
+    if fieldDef.args.isEmpty, fieldAST.arguments.isEmpty {
+        args = [:]
+    } else {
+        args = try getArgumentValues(
+            argDefs: fieldDef.args,
+            argASTs: fieldAST.arguments,
+            variables: exeContext.variableValues
+        )
+    }
 
     // The resolve func's optional third argument is a context value that
     // is provided to every resolve func within an execution. It is commonly
@@ -614,13 +1107,38 @@ public func resolveField(
 
     // Get the resolve func, regardless of if its result is normal
     // or abrupt (error).
-    let result = await resolveOrError(
-        resolve: resolve,
-        source: source,
-        args: args,
-        context: context,
-        info: info
-    )
+    let result: Result<(any Sendable)?, Error>
+    if let fastResolve {
+        do {
+            result = .success(try fastResolve(source))
+        } catch {
+            result = .failure(error)
+        }
+    } else if let synchronousResolve {
+        result = resolveOrError(
+            resolve: synchronousResolve,
+            source: source,
+            args: args,
+            context: context,
+            info: info
+        )
+    } else if let resolve {
+        result = await resolveOrError(
+            resolve: resolve,
+            source: source,
+            args: args,
+            context: context,
+            info: info
+        )
+    } else {
+        result = resolveOrError(
+            resolve: defaultResolve,
+            source: source,
+            args: args,
+            context: context,
+            info: info
+        )
+    }
 
     return try await completeValueCatchingError(
         exeContext: exeContext,
@@ -649,6 +1167,20 @@ func resolveOrError(
     }
 }
 
+func resolveOrError(
+    resolve: GraphQLFieldResolveInput,
+    source: any Sendable,
+    args: Map,
+    context: any Sendable,
+    info: GraphQLResolveInfo
+) -> Result<(any Sendable)?, Error> {
+    do {
+        return .success(try resolve(source, args, context, info))
+    } catch {
+        return .failure(error)
+    }
+}
+
 /// This is a small wrapper around completeValue which detects and logs errors
 /// in the execution context.
 func completeValueCatchingError(
@@ -658,7 +1190,7 @@ func completeValueCatchingError(
     info: GraphQLResolveInfo,
     path: IndexPath,
     result: Result<(any Sendable)?, Error>
-) async throws -> (any Sendable)? {
+) async throws -> Map? {
     // If the field type is non-nullable, then it is resolved without any
     // protection from errors, however it still properly locates the error.
     if let returnType = returnType as? GraphQLNonNull {
@@ -702,7 +1234,7 @@ func completeValueWithLocatedError(
     info: GraphQLResolveInfo,
     path: IndexPath,
     result: Result<(any Sendable)?, Error>
-) async throws -> (any Sendable)? {
+) async throws -> Map? {
     do {
         return try await completeValue(
             exeContext: exeContext,
@@ -749,7 +1281,7 @@ func completeValue(
     info: GraphQLResolveInfo,
     path: IndexPath,
     result: Result<(any Sendable)?, Error>
-) async throws -> (any Sendable)? {
+) async throws -> Map? {
     switch result {
     case let .failure(error):
         throw error
@@ -840,7 +1372,7 @@ func completeListValue(
     info: GraphQLResolveInfo,
     path: IndexPath,
     result: any Sendable
-) async throws -> [(any Sendable)?] {
+) async throws -> Map {
     guard let result = result as? [(any Sendable)?] else {
         throw GraphQLError(
             message:
@@ -851,31 +1383,21 @@ func completeListValue(
 
     let itemType = returnType.ofType
 
-    return try await withThrowingTaskGroup(of: (Int, (any Sendable)?).self) { group in
-        // To preserve order, match size to result, and filter out nils at the end.
-        var results = [(any Sendable)?](repeating: nil, count: result.count)
-        for (index, item) in result.enumerated() {
-            group.addTask {
-                // No need to modify the info object containing the path,
-                // since from here on it is not ever accessed by resolver funcs.
-                let fieldPath = path.appending(index)
-
-                let result = try await completeValueCatchingError(
-                    exeContext: exeContext,
-                    returnType: itemType,
-                    fieldASTs: fieldASTs,
-                    info: info,
-                    path: fieldPath,
-                    result: .success(item)
-                )
-                return (index, result)
-            }
-        }
-        for try await result in group {
-            results[result.0] = result.1
-        }
-        return results.compactMap { $0 }
+    var results = [Map]()
+    results.reserveCapacity(result.count)
+    for (index, item) in result.enumerated() {
+        let fieldPath = path.appending(index)
+        let completed = try await completeValueCatchingError(
+            exeContext: exeContext,
+            returnType: itemType,
+            fieldASTs: fieldASTs,
+            info: info,
+            path: fieldPath,
+            result: .success(item)
+        )
+        results.append(completed ?? .null)
     }
+    return .array(results)
 }
 
 /**
@@ -902,7 +1424,7 @@ func completeAbstractValue(
     info: GraphQLResolveInfo,
     path: IndexPath,
     result: any Sendable
-) async throws -> (any Sendable)? {
+) async throws -> Map? {
     var resolveRes = try returnType.resolveType?(result, info)
         .typeResolveResult
 
@@ -968,7 +1490,7 @@ func completeObjectValue(
     info: GraphQLResolveInfo,
     path: IndexPath,
     result: any Sendable
-) async throws -> (any Sendable)? {
+) async throws -> Map? {
     // If there is an isTypeOf predicate func, call it with the
     // current result. If isTypeOf returns false, then raise an error rather
     // than continuing execution.
@@ -983,29 +1505,39 @@ func completeObjectValue(
         )
     }
 
-    // Collect sub-fields to execute to complete this value.
-    var subFieldASTs: OrderedDictionary<String, [Field]> = [:]
-    var visitedFragmentNames: [String: Bool] = [:]
-
-    for fieldAST in fieldASTs {
-        if let selectionSet = fieldAST.selectionSet {
-            subFieldASTs = try collectFields(
-                exeContext: exeContext,
-                runtimeType: returnType,
-                selectionSet: selectionSet,
-                fields: &subFieldASTs,
-                visitedFragmentNames: &visitedFragmentNames
-            )
+    // Lists complete an identical selection set for every item. Cache that per-request plan
+    // instead of walking and merging the AST again for each object.
+    let subFieldASTs: OrderedDictionary<String, [Field]>
+    if fieldASTs.count == 1, let selectionSet = fieldASTs[0].selectionSet {
+        subFieldASTs = try exeContext.collectedFields(
+            runtimeType: returnType,
+            selectionSet: selectionSet
+        )
+    } else {
+        var collected: OrderedDictionary<String, [Field]> = [:]
+        var visitedFragmentNames: [String: Bool] = [:]
+        for fieldAST in fieldASTs {
+            if let selectionSet = fieldAST.selectionSet {
+                collected = try collectFields(
+                    exeContext: exeContext,
+                    runtimeType: returnType,
+                    selectionSet: selectionSet,
+                    fields: &collected,
+                    visitedFragmentNames: &visitedFragmentNames
+                )
+            }
         }
+        subFieldASTs = collected
     }
 
-    return try await exeContext.queryStrategy.executeFields(
+    let completed = try await exeContext.queryStrategy.executeFields(
         exeContext: exeContext,
         parentType: returnType,
         sourceValue: result,
         path: path,
         fields: subFieldASTs
     )
+    return .dictionary(completed)
 }
 
 /**
@@ -1040,9 +1572,33 @@ func defaultResolve(
     args _: Map,
     context _: any Sendable,
     info: GraphQLResolveInfo
-) async throws -> (any Sendable)? {
+) throws -> (any Sendable)? {
     guard let source = unwrap(source) else {
         return nil
+    }
+
+    // Introspection traverses schema metadata rather than application models. Resolve its hottest
+    // structural properties directly instead of constructing a Mirror for every selected field.
+    switch info.fieldName {
+    case "name":
+        if let value = source as? GraphQLNamedType { return value.name }
+        if let value = source as? GraphQLFieldDefinition { return value.name }
+        if let value = source as? GraphQLArgumentDefinition { return value.name }
+        if let value = source as? GraphQLDirective { return value.name }
+        if let value = source as? GraphQLEnumValueDefinition { return value.name }
+        if let value = source as? InputObjectFieldDefinition { return value.name }
+    case "type":
+        if let value = source as? GraphQLFieldDefinition { return value.type }
+        if let value = source as? GraphQLArgumentDefinition { return value.type }
+        if let value = source as? InputObjectFieldDefinition { return value.type }
+    case "ofType":
+        if let value = source as? GraphQLList { return value.ofType }
+        if let value = source as? GraphQLNonNull { return value.ofType }
+        return nil
+    case "locations":
+        if let value = source as? GraphQLDirective { return value.locations }
+    default:
+        break
     }
 
     if let subscriptable = source as? KeySubscriptable {

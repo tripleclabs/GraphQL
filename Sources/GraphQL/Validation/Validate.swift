@@ -14,11 +14,27 @@
 public func validate(
     schema: GraphQLSchema,
     ast: Document,
-    rules: [@Sendable (ValidationContext) -> Visitor] = specifiedRules
+    rules: [@Sendable (ValidationContext) -> Visitor] = []
 ) -> [GraphQLError] {
+    if rules.isEmpty, let errors = validateSimpleExecutableDocument(schema: schema, document: ast) {
+        return errors
+    }
     let typeInfo = TypeInfo(schema: schema)
-    let rules = rules.isEmpty ? specifiedRules : rules
-    return visit(usingRules: rules, schema: schema, typeInfo: typeInfo, documentAST: ast)
+    var recordVariableUsages = !rules.isEmpty
+    let rules = rules.isEmpty
+        ? specifiedRules(
+            for: ast,
+            schema: schema,
+            recordVariableUsages: &recordVariableUsages
+        )
+        : rules
+    return visit(
+        usingRules: rules,
+        schema: schema,
+        typeInfo: typeInfo,
+        documentAST: ast,
+        recordVariableUsages: recordVariableUsages
+    )
 }
 
 /**
@@ -54,10 +70,14 @@ func visit(
     usingRules rules: [@Sendable (ValidationContext) -> Visitor],
     schema: GraphQLSchema,
     typeInfo: TypeInfo,
-    documentAST: Document
+    documentAST: Document,
+    recordVariableUsages: Bool = true
 ) -> [GraphQLError] {
     let context = ValidationContext(schema: schema, ast: documentAST, typeInfo: typeInfo)
-    let visitors = rules.map { rule in rule(context) }
+    var visitors = rules.map { rule in rule(context) }
+    if recordVariableUsages {
+        visitors.insert(context.variableUsageRecordingVisitor(), at: 0)
+    }
     // Visit the whole document with each instance of all provided rules.
     visit(
         root: documentAST,

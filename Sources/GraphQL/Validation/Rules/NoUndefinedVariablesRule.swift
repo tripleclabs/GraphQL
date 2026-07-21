@@ -9,7 +9,7 @@
  */
 func NoUndefinedVariablesRule(context: ValidationContext) -> Visitor {
     return Visitor(
-        enter: { node, _, _, _, _ in
+        leave: { node, _, _, _, _ in
             switch node.kind {
             case .operationDefinition:
                 let operation = node as! OperationDefinition

@@ -10,6 +10,7 @@ let __Schema = try! GraphQLObjectType(
         "types": GraphQLField(
             type: GraphQLNonNull(GraphQLList(GraphQLNonNull(__Type))),
             description: "A list of all types supported by this server.",
+            astNode: nil,
             resolve: { schema, _, _, _ -> [GraphQLNamedType]? in
                 guard let schema = schema as? GraphQLSchema else {
                     return nil
@@ -22,6 +23,7 @@ let __Schema = try! GraphQLObjectType(
         "queryType": GraphQLField(
             type: GraphQLNonNull(__Type),
             description: "The type that query operations will be rooted at.",
+            astNode: nil,
             resolve: { schema, _, _, _ -> GraphQLObjectType? in
                 guard let schema = schema as? GraphQLSchema else {
                     return nil
@@ -35,6 +37,7 @@ let __Schema = try! GraphQLObjectType(
             description:
             "If this server supports mutation, the type that " +
                 "mutation operations will be rooted at.",
+            astNode: nil,
             resolve: { schema, _, _, _ -> GraphQLObjectType? in
                 guard let schema = schema as? GraphQLSchema else {
                     return nil
@@ -48,6 +51,7 @@ let __Schema = try! GraphQLObjectType(
             description:
             "If this server support subscription, the type that " +
                 "subscription operations will be rooted at.",
+            astNode: nil,
             resolve: { schema, _, _, _ -> GraphQLObjectType? in
                 guard let schema = schema as? GraphQLSchema else {
                     return nil
@@ -59,6 +63,7 @@ let __Schema = try! GraphQLObjectType(
         "directives": GraphQLField(
             type: GraphQLNonNull(GraphQLList(GraphQLNonNull(__Directive))),
             description: "A list of all directives supported by this server.",
+            astNode: nil,
             resolve: { schema, _, _, _ -> [GraphQLDirective]? in
                 guard let schema = schema as? GraphQLSchema else {
                     return nil
@@ -91,6 +96,7 @@ let __Directive = try! GraphQLObjectType(
             args: [
                 "includeDeprecated": GraphQLArgument(type: GraphQLBoolean, defaultValue: false),
             ],
+            astNode: nil,
             resolve: { directive, _, _, _ -> [GraphQLArgumentDefinition]? in
                 guard let directive = directive as? GraphQLDirective else {
                     return nil
@@ -207,6 +213,7 @@ let __Type: GraphQLObjectType = {
     __Type.fields = { [
         "kind": GraphQLField(
             type: GraphQLNonNull(__TypeKind),
+            astNode: nil,
             resolve: { type, _, _, _ -> TypeKind? in
                 switch type {
                 case let type as GraphQLScalarType:
@@ -241,6 +248,7 @@ let __Type: GraphQLObjectType = {
                     defaultValue: false
                 ),
             ],
+            astNode: nil,
             resolve: { type, arguments, _, _ -> [GraphQLFieldDefinition]? in
                 if let type = type as? GraphQLObjectType {
                     let fieldMap = try type.getFields()
@@ -269,6 +277,7 @@ let __Type: GraphQLObjectType = {
         ),
         "interfaces": GraphQLField(
             type: GraphQLList(GraphQLNonNull(__Type)),
+            astNode: nil,
             resolve: { type, _, _, _ -> [GraphQLInterfaceType]? in
                 if let type = type as? GraphQLObjectType {
                     return try type.getInterfaces()
@@ -283,6 +292,7 @@ let __Type: GraphQLObjectType = {
         ),
         "possibleTypes": GraphQLField(
             type: GraphQLList(GraphQLNonNull(__Type)),
+            astNode: nil,
             resolve: { type, _, _, info -> [GraphQLObjectType]? in
                 guard let type = type as? GraphQLAbstractType else {
                     return nil
@@ -299,6 +309,7 @@ let __Type: GraphQLObjectType = {
                     defaultValue: false
                 ),
             ],
+            astNode: nil,
             resolve: { type, arguments, _, _ -> [GraphQLEnumValueDefinition]? in
                 guard let type = type as? GraphQLEnumType else {
                     return nil
@@ -321,6 +332,7 @@ let __Type: GraphQLObjectType = {
                     defaultValue: false
                 ),
             ],
+            astNode: nil,
             resolve: { type, _, _, _ -> [InputObjectFieldDefinition]? in
                 guard let type = type as? GraphQLInputObjectType else {
                     return nil
@@ -333,6 +345,7 @@ let __Type: GraphQLObjectType = {
         "ofType": GraphQLField(type: __Type),
         "isOneOf": GraphQLField(
             type: GraphQLBoolean,
+            astNode: nil,
             resolve: { type, _, _, _ in
                 if let type = type as? GraphQLInputObjectType {
                     return type.isOneOf
@@ -357,6 +370,7 @@ let __Field = try! GraphQLObjectType(
             args: [
                 "includeDeprecated": GraphQLArgument(type: GraphQLBoolean, defaultValue: false),
             ],
+            astNode: nil,
             resolve: { field, _, _, _ -> [GraphQLArgumentDefinition]? in
                 guard let field = field as? GraphQLFieldDefinition else {
                     return nil
@@ -386,6 +400,7 @@ let __InputValue = try! GraphQLObjectType(
             description:
             "A GraphQL-formatted string representing the default value for this " +
                 "input value.",
+            astNode: nil,
             resolve: { inputValue, _, _, _ -> Map? in
                 guard
                     let inputValue = inputValue as? GraphQLArgumentDefinition,
@@ -491,7 +506,8 @@ let SchemaMetaFieldDef = GraphQLFieldDefinition(
     name: "__schema",
     type: GraphQLNonNull(__Schema),
     description: "Access the current type schema of this server.",
-    resolve: { _, _, _, info in
+    resolve: nil,
+    synchronousResolve: { _, _, _, info in
         info.schema
     }
 )
@@ -506,7 +522,8 @@ let TypeMetaFieldDef = GraphQLFieldDefinition(
             type: GraphQLNonNull(GraphQLString)
         ),
     ],
-    resolve: { _, arguments, _, info in
+    resolve: nil,
+    synchronousResolve: { _, arguments, _, info in
         let name = arguments["name"].string!
         return info.schema.getType(name: name)
     }
@@ -516,7 +533,8 @@ let TypeNameMetaFieldDef = GraphQLFieldDefinition(
     name: "__typename",
     type: GraphQLNonNull(GraphQLString),
     description: "The name of the current Object type at runtime.",
-    resolve: { _, _, _, info in
+    resolve: nil,
+    synchronousResolve: { _, _, _, info in
         info.parentType.name
     }
 )
