@@ -45,10 +45,27 @@ import Testing
                         (source as? [String: any Sendable])?["person"]
                     }
                 ),
+                "people": GraphQLField(
+                    type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person))),
+                    fastResolve: { source in
+                        (source as? [String: any Sendable])?["people"]
+                    }
+                ),
             ]
         )
         return try GraphQLSchema(query: query)
     }
+
+    static let listQuery = """
+    query ListItems {
+      people {
+        id
+        name
+        birthYear
+        species { id name classification }
+      }
+    }
+    """
 
     /// Runs the query through both engines and asserts the fast path was eligible and matches
     /// Engine V1 on data and (message-normalized) errors.
@@ -123,6 +140,54 @@ import Testing
                 "birthYear": "19BBY",
             ] as [String: any Sendable],
         ])
+    }
+
+    static let peopleSource: [String: any Sendable] = [
+        "people": [
+            [
+                "id": "1",
+                "name": "Luke Skywalker",
+                "birthYear": "19BBY",
+                "species": [
+                    "id": "3", "name": "Human", "classification": "mammal",
+                ] as [String: any Sendable],
+            ] as [String: any Sendable],
+            [
+                "id": "2",
+                "name": "C-3PO",
+                // birthYear absent -> null
+                "species": [
+                    "id": "4", "name": "Droid",
+                    // classification absent -> null
+                ] as [String: any Sendable],
+            ] as [String: any Sendable],
+        ] as [[String: any Sendable]],
+    ]
+
+    @Test func matchesEngineV1OnPopulatedList() async throws {
+        try await Self.expectMatch(rootValue: Self.peopleSource, query: Self.listQuery)
+    }
+
+    @Test func matchesEngineV1OnEmptyList() async throws {
+        try await Self.expectMatch(
+            rootValue: ["people": [[String: any Sendable]]()],
+            query: Self.listQuery
+        )
+    }
+
+    @Test func matchesEngineV1WhenNonNullListElementNulls() async throws {
+        // A missing non-null `name` on an element errors; because the element and the list are both
+        // non-null, the error propagates and nulls the entire `people` field.
+        try await Self.expectMatch(
+            rootValue: [
+                "people": [
+                    ["id": "1", "name": "Luke", "species": [String: any Sendable]()]
+                        as [String: any Sendable],
+                    ["id": "2" /* name absent */ ] as [String: any Sendable],
+                ] as [[String: any Sendable]],
+            ],
+            query: Self.listQuery
+        )
     }
 
     @Test func fallsBackForFragments() throws {

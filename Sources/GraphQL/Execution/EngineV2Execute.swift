@@ -19,11 +19,18 @@ enum EngineV2Execute {
         case defaultKeyed
     }
 
-    /// Completion shape for one planned field. Lists and abstract types are deliberately excluded
-    /// and force a fallback during planning.
+    /// Completion shape for one planned field, mirroring the field's wrapped output type. Abstract
+    /// and input types are excluded and force a fallback during planning.
     indirect enum PlanCompletion {
-        case leaf(GraphQLLeafType, nonNull: Bool)
-        case object(GraphQLObjectType, nonNull: Bool, children: [PlanField])
+        case leaf(GraphQLLeafType)
+        case object(GraphQLObjectType, children: [PlanField])
+        case list(PlanCompletion)
+        case nonNull(PlanCompletion)
+
+        var isNonNull: Bool {
+            if case .nonNull = self { return true }
+            return false
+        }
     }
 
     struct PlanField {
@@ -34,15 +41,21 @@ enum EngineV2Execute {
         let completion: PlanCompletion
     }
 
-    /// Executes the request through the fast path, or returns `nil` when the document is not
-    /// eligible and Engine V1 must handle it.
-    static func run(
+    /// A fully compiled, self-contained execution plan. It captures resolver thunks, completion
+    /// shapes, and response keys, so execution needs neither the document nor the compiled schema.
+    struct Plan {
+        let fields: [PlanField]
+    }
+
+    /// Compiles the request into an execution plan, or returns `nil` when the document is not
+    /// eligible and Engine V1 must handle it. Parsing, name-to-numeric resolution, and structural
+    /// validation all happen here in one pass.
+    static func compilePlan(
         schema: GraphQLSchema,
         request: String,
-        rootValue: any Sendable,
         variableValues: [String: Map],
         operationName: String?
-    ) -> GraphQLResult? {
+    ) -> Plan? {
         // The slice does not yet coerce variables.
         guard variableValues.isEmpty else { return nil }
         guard let compiled = try? schema.engineV2CompiledSchema() else { return nil }
@@ -65,23 +78,45 @@ enum EngineV2Execute {
         guard compiled.namedTypes[Int(queryTypeID.rawValue)] is GraphQLObjectType else { return nil }
 
         var planner = Planner(document: document, compiled: compiled)
-        guard let plan = planner.planSelectionSet(
+        guard let fields = planner.planSelectionSet(
             operation.selectionSet,
             parentType: queryTypeID
         ) else { return nil }
+        return Plan(fields: fields)
+    }
 
+    /// Executes a precompiled plan against a root value and materializes the public result.
+    static func execute(plan: Plan, rootValue: any Sendable) -> GraphQLResult {
         var errors: [GraphQLError] = []
         let data: OrderedDictionary<String, Map>
         do {
-            data = try execute(fields: plan, source: rootValue, errors: &errors)
+            data = try execute(fields: plan.fields, source: rootValue, errors: &errors)
         } catch let error as GraphQLError {
-            errors.append(error)
-            return GraphQLResult(data: .null, errors: errors)
+            // Matching Engine V1: an error propagating to the root yields absent data and only the
+            // propagated error; accumulated field errors are discarded.
+            return GraphQLResult(errors: [error])
         } catch {
-            errors.append(GraphQLError(error))
-            return GraphQLResult(data: .null, errors: errors)
+            return GraphQLResult(errors: [GraphQLError(error)])
         }
         return GraphQLResult(data: .dictionary(data), errors: errors)
+    }
+
+    /// Executes the request through the fast path, or returns `nil` when the document is not
+    /// eligible and Engine V1 must handle it.
+    static func run(
+        schema: GraphQLSchema,
+        request: String,
+        rootValue: any Sendable,
+        variableValues: [String: Map],
+        operationName: String?
+    ) -> GraphQLResult? {
+        guard let plan = compilePlan(
+            schema: schema,
+            request: request,
+            variableValues: variableValues,
+            operationName: operationName
+        ) else { return nil }
+        return execute(plan: plan, rootValue: rootValue)
     }
 
     // MARK: - Planning
@@ -169,33 +204,43 @@ enum EngineV2Execute {
             typeReference: FastSchemaTypeReferenceID,
             childSelectionSet: UInt32?
         ) -> PlanCompletion? {
-            var reference = compiled.metadata.typeReferences[Int(typeReference.rawValue)]
-            var nonNull = false
-            if reference.kind == .nonNull {
-                nonNull = true
-                guard let wrapped = reference.wrappedType else { return nil }
-                reference = compiled.metadata.typeReferences[Int(wrapped.rawValue)]
+            let reference = compiled.metadata.typeReferences[Int(typeReference.rawValue)]
+            switch reference.kind {
+            case .nonNull:
+                guard let wrapped = reference.wrappedType,
+                      let inner = planCompletion(
+                          typeReference: wrapped,
+                          childSelectionSet: childSelectionSet
+                      )
+                else { return nil }
+                return .nonNull(inner)
+            case .list:
+                guard let wrapped = reference.wrappedType,
+                      let inner = planCompletion(
+                          typeReference: wrapped,
+                          childSelectionSet: childSelectionSet
+                      )
+                else { return nil }
+                return .list(inner)
+            case .named:
+                let namedType = compiled.namedTypes[Int(reference.namedType.rawValue)]
+                if let leaf = namedType as? GraphQLLeafType {
+                    guard childSelectionSet == nil else { return nil }
+                    return .leaf(leaf)
+                }
+                if let object = namedType as? GraphQLObjectType {
+                    // Runtime type disambiguation is out of slice scope.
+                    guard object.isTypeOf == nil else { return nil }
+                    guard let childSelectionSet else { return nil }
+                    guard let children = planSelectionSet(
+                        childSelectionSet,
+                        parentType: reference.namedType
+                    ) else { return nil }
+                    return .object(object, children: children)
+                }
+                // Unions, interfaces, and input objects fall back.
+                return nil
             }
-            // Lists and additional wrappers are deferred to the list_items slice.
-            guard reference.kind == .named else { return nil }
-
-            let namedType = compiled.namedTypes[Int(reference.namedType.rawValue)]
-            if let leaf = namedType as? GraphQLLeafType {
-                guard childSelectionSet == nil else { return nil }
-                return .leaf(leaf, nonNull: nonNull)
-            }
-            if let object = namedType as? GraphQLObjectType {
-                // Runtime type disambiguation is out of slice scope.
-                guard object.isTypeOf == nil else { return nil }
-                guard let childSelectionSet else { return nil }
-                guard let children = planSelectionSet(
-                    childSelectionSet,
-                    parentType: reference.namedType
-                ) else { return nil }
-                return .object(object, nonNull: nonNull, children: children)
-            }
-            // Unions, interfaces, and input objects fall back.
-            return nil
         }
 
         /// Conservative structural argument validation: every provided argument must be declared,
@@ -252,8 +297,10 @@ enum EngineV2Execute {
         for field in fields {
             let resolved = try resolve(field: field, source: source)
             let completed = try completeCatchingError(
-                field: field,
+                completion: field.completion,
                 value: resolved,
+                parentTypeName: field.parentTypeName,
+                fieldName: field.fieldName,
                 errors: &errors
             )
             results[field.responseKey] = completed ?? .null
@@ -286,57 +333,91 @@ enum EngineV2Execute {
         return Mirror(reflecting: source).getValue(named: name)
     }
 
+    /// Applies Engine V1's located-error boundary: an error (or null) in a non-null position
+    /// propagates to null the parent, while a nullable position captures the error and becomes null.
+    /// Applied per field and per list element.
     private static func completeCatchingError(
-        field: PlanField,
+        completion: PlanCompletion,
         value: (any Sendable)?,
+        parentTypeName: String,
+        fieldName: String,
         errors: inout [GraphQLError]
     ) throws -> Map? {
-        if field.completion.isNonNull {
-            // Errors in non-null positions propagate to null the parent.
-            return try complete(field: field, value: value, errors: &errors)
+        if completion.isNonNull {
+            return try completeValue(
+                completion: completion,
+                value: value,
+                parentTypeName: parentTypeName,
+                fieldName: fieldName,
+                errors: &errors
+            )
         }
         do {
-            return try complete(field: field, value: value, errors: &errors)
+            return try completeValue(
+                completion: completion,
+                value: value,
+                parentTypeName: parentTypeName,
+                fieldName: fieldName,
+                errors: &errors
+            )
         } catch let error as GraphQLError {
             errors.append(error)
             return nil
         }
     }
 
-    private static func complete(
-        field: PlanField,
+    private static func completeValue(
+        completion: PlanCompletion,
         value: (any Sendable)?,
+        parentTypeName: String,
+        fieldName: String,
         errors: inout [GraphQLError]
     ) throws -> Map? {
-        switch field.completion {
-        case let .leaf(leaf, nonNull):
-            guard let value, let unwrapped = unwrap(value) else {
-                if nonNull { throw nonNullError(field) }
-                return nil
+        switch completion {
+        case let .nonNull(inner):
+            guard let completed = try completeValue(
+                completion: inner,
+                value: value,
+                parentTypeName: parentTypeName,
+                fieldName: fieldName,
+                errors: &errors
+            ) else {
+                throw nonNullError(parentTypeName: parentTypeName, fieldName: fieldName)
             }
+            return completed
+        case let .leaf(leaf):
+            guard let value, let unwrapped = unwrap(value) else { return nil }
             return try leaf.serialize(value: unwrapped)
-        case let .object(_, nonNull, children):
-            guard let value, let unwrapped = unwrap(value) else {
-                if nonNull { throw nonNullError(field) }
-                return nil
-            }
+        case let .object(_, children):
+            guard let value, let unwrapped = unwrap(value) else { return nil }
             return .dictionary(try execute(fields: children, source: unwrapped, errors: &errors))
+        case let .list(inner):
+            guard let value, let unwrapped = unwrap(value) else { return nil }
+            guard let items = unwrapped as? [(any Sendable)?] else {
+                throw GraphQLError(
+                    message: "Expected array, but did not find one for field \(parentTypeName).\(fieldName)."
+                )
+            }
+            var completed = [Map]()
+            completed.reserveCapacity(items.count)
+            for item in items {
+                let element = try completeCatchingError(
+                    completion: inner,
+                    value: item,
+                    parentTypeName: parentTypeName,
+                    fieldName: fieldName,
+                    errors: &errors
+                )
+                completed.append(element ?? .null)
+            }
+            return .array(completed)
         }
     }
 
-    private static func nonNullError(_ field: PlanField) -> GraphQLError {
+    private static func nonNullError(parentTypeName: String, fieldName: String) -> GraphQLError {
         GraphQLError(
-            message: "Cannot return null for non-nullable field \(field.parentTypeName).\(field.fieldName)."
+            message: "Cannot return null for non-nullable field \(parentTypeName).\(fieldName)."
         )
-    }
-}
-
-private extension EngineV2Execute.PlanCompletion {
-    var isNonNull: Bool {
-        switch self {
-        case let .leaf(_, nonNull): return nonNull
-        case let .object(_, nonNull, _): return nonNull
-        }
     }
 }
 
@@ -353,4 +434,39 @@ public func engineV2ExecuteSingleItem(
         variableValues: [:],
         operationName: nil
     )
+}
+
+/// An opaque, precompiled Engine V2 plan for benchmark reuse.
+@_spi(EngineV2Benchmark)
+public struct EngineV2BenchmarkPlan {
+    let plan: EngineV2Execute.Plan
+}
+
+/// Parse + fuse the request into a numeric execution plan. Returns the planned top-level field
+/// count, or `nil` when the fast path is not eligible.
+@_spi(EngineV2Benchmark)
+public func engineV2CompileSingleItemPlan(
+    _ schema: GraphQLSchema,
+    _ request: String
+) -> EngineV2BenchmarkPlan? {
+    EngineV2Execute.compilePlan(
+        schema: schema,
+        request: request,
+        variableValues: [:],
+        operationName: nil
+    ).map(EngineV2BenchmarkPlan.init)
+}
+
+@_spi(EngineV2Benchmark)
+public func engineV2PlanFieldCount(_ plan: EngineV2BenchmarkPlan) -> Int {
+    plan.plan.fields.count
+}
+
+/// Execute a precompiled plan. Isolates execution + materialization from parse/plan cost.
+@_spi(EngineV2Benchmark)
+public func engineV2ExecutePlan(
+    _ plan: EngineV2BenchmarkPlan,
+    rootValue: any Sendable = ()
+) -> GraphQLResult {
+    EngineV2Execute.execute(plan: plan.plan, rootValue: rootValue)
 }

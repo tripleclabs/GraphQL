@@ -35,18 +35,31 @@ private let parsedSuccessfulQuery = try! FastParser.parse(successfulQuery)
 private let parsedEscapedStringQuery = try! FastParser.parse(escapedStringQuery)
 private let parsedBlockStringQuery = try! FastParser.parse(blockStringQuery)
 private let benchmarkSchema = try! makeBenchmarkSchema()
-private let benchmarkRootValue: [String: any Sendable] = [
-    "person": [
-        "id": "1",
-        "name": "Luke Skywalker",
-        "birthYear": "19BBY",
-        "species": [
-            "id": "3",
-            "name": "Human",
-            "classification": "mammal",
-        ] as [String: any Sendable],
+private let benchmarkPerson: [String: any Sendable] = [
+    "id": "1",
+    "name": "Luke Skywalker",
+    "birthYear": "19BBY",
+    "species": [
+        "id": "3",
+        "name": "Human",
+        "classification": "mammal",
     ] as [String: any Sendable],
 ]
+private let benchmarkRootValue: [String: any Sendable] = [
+    "person": benchmarkPerson,
+    "people": [[String: any Sendable]](repeating: benchmarkPerson, count: 20)
+        as [[String: any Sendable]],
+]
+private let listQuery = """
+query ListItems {
+  people {
+    id
+    name
+    birthYear
+    species { id name classification }
+  }
+}
+"""
 private let cachedBenchmarkSchema = try! engineV2CachedSchema(benchmarkSchema)
 private let benchmarkQueryTypeID = cachedBenchmarkSchema.typeID(named: "Query")!
 private let benchmarkSearchResultTypeID = cachedBenchmarkSchema.typeID(named: "SearchResult")!
@@ -206,6 +219,37 @@ private func consumeResult(_ result: GraphQLResult?) -> Int {
         }
         return checksum
     }
+}
+
+// Isolates the pure cost of materializing the `list_items` result *shape* as the public `Map`
+// (OrderedDictionary-based), with no resolver calls, existential casts, or scalar serialization.
+// This is the floor any result representation must pay while the public contract is `Map`, so it
+// bounds how much a deferred result arena could possibly save for this case.
+@inline(never)
+private func buildListItemsShape() -> Map {
+    var people = [Map]()
+    people.reserveCapacity(20)
+    for _ in 0 ..< 20 {
+        let species: Map = [
+            "id": "3",
+            "name": "Human",
+            "classification": "mammal",
+        ]
+        let person: Map = [
+            "id": "1",
+            "name": "Luke Skywalker",
+            "birthYear": "19BBY",
+            "species": species,
+        ]
+        people.append(person)
+    }
+    return ["people": .array(people)]
+}
+
+@inline(never)
+private func consumeMap(_ map: Map) -> Int {
+    if case let .dictionary(fields) = map { return fields.count }
+    return 0
 }
 
 private func measureAsync(
@@ -377,7 +421,10 @@ private func makeBenchmarkSchema() throws -> GraphQLSchema {
                 args: ["id": GraphQLArgument(type: GraphQLNonNull(GraphQLID))],
                 fastResolve: { source in (source as? [String: any Sendable])?["person"] }
             ),
-            "people": GraphQLField(type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person)))),
+            "people": GraphQLField(
+                type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person))),
+                fastResolve: { source in (source as? [String: any Sendable])?["people"] }
+            ),
             "resolverProbe": GraphQLField(
                 type: GraphQLInt,
                 fastResolve: { source in (source as? Int ?? 0) &+ 1 }
@@ -421,7 +468,48 @@ private let v2EndToEnd = measure("v2_execute_single_item_e2e") {
         rootValue: benchmarkRootValue
     ))
 }
-private let endToEndMeasurements = [v1EndToEnd, v1ExecuteOnly, v2EndToEnd]
+// Engine V2 phase split: parse + fused plan compilation versus execute + materialize.
+private let v2PlanOnly = measure("v2_compile_plan_single_item") {
+    engineV2CompileSingleItemPlan(benchmarkSchema, successfulQuery)
+        .map(engineV2PlanFieldCount) ?? -1
+}
+private let v2PrecompiledPlan = engineV2CompileSingleItemPlan(benchmarkSchema, successfulQuery)!
+private let v2ExecuteOnly = measure("v2_execute_single_item_execute_only") {
+    consumeResult(engineV2ExecutePlan(v2PrecompiledPlan, rootValue: benchmarkRootValue))
+}
+// End-to-end `list_items` (20 nested elements): the case the result arena primarily targets.
+private let v1ListEndToEnd = await measureAsync("v1_execute_list_items_e2e") {
+    consumeResult(try? await graphql(
+        schema: benchmarkSchema,
+        request: listQuery,
+        rootValue: benchmarkRootValue
+    ))
+}
+private let v2ListEndToEnd = measure("v2_execute_list_items_e2e") {
+    consumeResult(engineV2ExecuteSingleItem(
+        benchmarkSchema,
+        listQuery,
+        rootValue: benchmarkRootValue
+    ))
+}
+private let v2ListPrecompiledPlan = engineV2CompileSingleItemPlan(benchmarkSchema, listQuery)!
+private let v2ListExecuteOnly = measure("v2_execute_list_items_execute_only") {
+    consumeResult(engineV2ExecutePlan(v2ListPrecompiledPlan, rootValue: benchmarkRootValue))
+}
+private let listShapeMaterialize = measure("map_build_list_items_shape_floor") {
+    consumeMap(buildListItemsShape())
+}
+private let endToEndMeasurements = [
+    v1EndToEnd,
+    v1ExecuteOnly,
+    v2EndToEnd,
+    v2PlanOnly,
+    v2ExecuteOnly,
+    v1ListEndToEnd,
+    v2ListEndToEnd,
+    v2ListExecuteOnly,
+    listShapeMaterialize,
+]
 
 print("Release microbenchmark: \(warmup) warmups, \(iterations) iterations, \(sampleCount) samples")
 print("| Boundary | Median |")
