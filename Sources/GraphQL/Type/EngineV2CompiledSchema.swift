@@ -5,6 +5,8 @@ struct EngineV2CompiledSchema: Sendable {
     let namedTypes: ContiguousArray<GraphQLNamedType>
     let fieldDefinitions: ContiguousArray<GraphQLFieldDefinition>
     let inputDefaults: ContiguousArray<Map?>
+    let enumValueDefinitions: ContiguousArray<GraphQLEnumValueDefinition>
+    let directiveDefinitions: ContiguousArray<GraphQLDirective>
 }
 
 extension GraphQLSchema {
@@ -48,9 +50,13 @@ private struct Builder {
     var typeReferences: ContiguousArray<FastSchemaTypeReference> = []
     var fields: ContiguousArray<FastSchemaField> = []
     var inputValues: ContiguousArray<FastSchemaInputValue> = []
+    var typeMembers: ContiguousArray<FastSchemaTypeID> = []
+    var enumValues: ContiguousArray<FastSchemaEnumValue> = []
+    var directives: ContiguousArray<FastSchemaDirective> = []
     var namedTypes: ContiguousArray<GraphQLNamedType> = []
     var fieldDefinitions: ContiguousArray<GraphQLFieldDefinition> = []
     var inputDefaults: ContiguousArray<Map?> = []
+    var enumValueDefinitions: ContiguousArray<GraphQLEnumValueDefinition> = []
 
     mutating func compile() throws -> EngineV2CompiledSchema {
         names.reserveCapacity(schema.typeMap.count * 2)
@@ -67,7 +73,10 @@ private struct Builder {
                 kind: kind(of: namedType),
                 name: try intern(namedType.name),
                 fields: .empty,
-                inputFields: .empty
+                inputFields: .empty,
+                interfaces: .empty,
+                possibleTypes: .empty,
+                enumValues: .empty
             ))
         }
 
@@ -75,13 +84,21 @@ private struct Builder {
             let typeID = FastSchemaTypeID(rawValue: UInt32(index))
             let fieldRange = try compileFields(of: namedType, parent: typeID)
             let inputFieldRange = try compileInputFields(of: namedType)
+            let interfaceRange = try compileInterfaces(of: namedType)
+            let possibleTypeRange = try compilePossibleTypes(of: namedType)
+            let enumValueRange = try compileEnumValues(of: namedType)
             types[index] = FastSchemaType(
                 kind: kind(of: namedType),
                 name: types[index].name,
                 fields: fieldRange,
-                inputFields: inputFieldRange
+                inputFields: inputFieldRange,
+                interfaces: interfaceRange,
+                possibleTypes: possibleTypeRange,
+                enumValues: enumValueRange
             )
         }
+
+        try compileDirectives()
 
         let roots = FastSchemaRoots(
             query: schema.queryType.flatMap { typeIDs[$0.name] },
@@ -94,14 +111,120 @@ private struct Builder {
             typeReferences: typeReferences,
             fields: fields,
             inputValues: inputValues,
+            typeMembers: typeMembers,
+            enumValues: enumValues,
+            directives: directives,
             roots: roots
         )
         return EngineV2CompiledSchema(
             metadata: metadata,
             namedTypes: namedTypes,
             fieldDefinitions: fieldDefinitions,
-            inputDefaults: inputDefaults
+            inputDefaults: inputDefaults,
+            enumValueDefinitions: enumValueDefinitions,
+            directiveDefinitions: ContiguousArray(schema.directives)
         )
+    }
+
+    mutating func compileInterfaces(of namedType: GraphQLNamedType) throws -> FastArenaRange {
+        let interfaces: [GraphQLInterfaceType]
+        if let object = namedType as? GraphQLObjectType {
+            interfaces = try object.getInterfaces()
+        } else if let interface = namedType as? GraphQLInterfaceType {
+            interfaces = try interface.getInterfaces()
+        } else {
+            return .empty
+        }
+        return try appendTypeMembers(interfaces)
+    }
+
+    mutating func compilePossibleTypes(of namedType: GraphQLNamedType) throws -> FastArenaRange {
+        if let union = namedType as? GraphQLUnionType {
+            return try appendTypeMembers(try union.getTypes())
+        }
+        if let interface = namedType as? GraphQLInterfaceType {
+            return try appendTypeMembers(schema.getImplementations(interfaceType: interface).objects)
+        }
+        return .empty
+    }
+
+    mutating func appendTypeMembers<T: Sequence>(
+        _ members: T
+    ) throws -> FastArenaRange where T.Element: GraphQLNamedType {
+        let start = try checkedID(typeMembers.count)
+        var count: UInt32 = 0
+        for member in members {
+            guard let id = typeIDs[member.name] else {
+                throw GraphQLError(message: "Engine V2 cannot resolve schema type \(member.name).")
+            }
+            typeMembers.append(id)
+            count += 1
+        }
+        return FastArenaRange(start: start, count: count)
+    }
+
+    mutating func compileEnumValues(of namedType: GraphQLNamedType) throws -> FastArenaRange {
+        guard let enumType = namedType as? GraphQLEnumType else { return .empty }
+        let start = try checkedID(enumValues.count)
+        for value in enumType.values {
+            enumValues.append(FastSchemaEnumValue(
+                name: try intern(value.name),
+                isDeprecated: value.isDeprecated
+            ))
+            enumValueDefinitions.append(value)
+        }
+        return FastArenaRange(start: start, count: try checkedID(enumType.values.count))
+    }
+
+    mutating func compileDirectives() throws {
+        directives.reserveCapacity(schema.directives.count)
+        for directive in schema.directives {
+            let argumentStart = try checkedID(inputValues.count)
+            for argument in directive.args {
+                try appendInputValue(
+                    name: argument.name,
+                    type: argument.type,
+                    defaultValue: argument.defaultValue,
+                    isDeprecated: argument.deprecationReason != nil
+                )
+            }
+            directives.append(FastSchemaDirective(
+                name: try intern(directive.name),
+                arguments: FastArenaRange(
+                    start: argumentStart,
+                    count: try checkedID(directive.args.count)
+                ),
+                locations: directive.locations.reduce(into: FastDirectiveLocations()) {
+                    $0.insert(fastLocation($1))
+                },
+                isRepeatable: directive.isRepeatable
+            ))
+        }
+    }
+
+    func fastLocation(_ location: DirectiveLocation) -> FastDirectiveLocations {
+        switch location {
+        case .query: return .query
+        case .mutation: return .mutation
+        case .subscription: return .subscription
+        case .field: return .field
+        case .fragmentDefinition: return .fragmentDefinition
+        case .fragmentSpread: return .fragmentSpread
+        case .fragmentVariableDefinition: return .fragmentVariableDefinition
+        case .inlineFragment: return .inlineFragment
+        case .variableDefinition: return .variableDefinition
+        case .schema: return .schema
+        case .scalar: return .scalar
+        case .object: return .object
+        case .fieldDefinition: return .fieldDefinition
+        case .argumentDefinition: return .argumentDefinition
+        case .interface: return .interface
+        case .union: return .union
+        case .enum: return .enum
+        case .enumValue: return .enumValue
+        case .inputObject: return .inputObject
+        case .inputFieldDefinition: return .inputFieldDefinition
+        }
     }
 
     mutating func compileFields(

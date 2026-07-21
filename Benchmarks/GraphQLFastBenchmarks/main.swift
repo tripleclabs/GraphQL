@@ -37,6 +37,10 @@ private let parsedBlockStringQuery = try! FastParser.parse(blockStringQuery)
 private let benchmarkSchema = try! makeBenchmarkSchema()
 private let cachedBenchmarkSchema = try! engineV2CachedSchema(benchmarkSchema)
 private let benchmarkQueryTypeID = cachedBenchmarkSchema.typeID(named: "Query")!
+private let benchmarkSearchResultTypeID = cachedBenchmarkSchema.typeID(named: "SearchResult")!
+private let benchmarkPersonTypeID = cachedBenchmarkSchema.typeID(named: "Person")!
+nonisolated(unsafe) private var v1PossibleTypeIteration = 0
+nonisolated(unsafe) private var v2PossibleTypeIteration = 0
 
 private let environment = ProcessInfo.processInfo.environment
 private let warmup = Int(environment["WARMUP"] ?? "1000") ?? 1000
@@ -104,7 +108,8 @@ private func consumeString(_ string: String) -> Int {
 @inline(never)
 private func consumeCompiledSchema(_ schema: FastCompiledSchema) -> Int {
     schema.names.count &+ schema.types.count &+ schema.fields.count &+
-        schema.typeReferences.count &+ schema.inputValues.count
+        schema.typeReferences.count &+ schema.inputValues.count &+ schema.typeMembers.count &+
+        schema.enumValues.count &+ schema.directives.count
 }
 
 @inline(never)
@@ -120,6 +125,29 @@ private func benchmarkV2TypeLookup(_ schema: FastCompiledSchema, name: String) -
 @inline(never)
 private func consumeFieldID(_ id: FastSchemaFieldID?) -> Int {
     Int(id?.rawValue ?? 0)
+}
+
+@inline(never)
+private func benchmarkV2PossibleType(
+    _ schema: FastCompiledSchema,
+    abstractType: FastSchemaTypeID,
+    matchingType: FastSchemaTypeID,
+    nonmatchingType: FastSchemaTypeID
+) -> Int {
+    v2PossibleTypeIteration &+= 1
+    let possibleType = v2PossibleTypeIteration & 1 == 0 ? matchingType : nonmatchingType
+    return schema.isPossibleType(possibleType, for: abstractType) ? 1 : 0
+}
+
+@inline(never)
+private func benchmarkV1PossibleType(_ schema: GraphQLSchema) -> Int {
+    v1PossibleTypeIteration &+= 1
+    let possibleTypeName = v1PossibleTypeIteration & 1 == 0 ? "Person" : "Query"
+    return engineV1PossibleTypeChecksum(
+        schema,
+        abstractTypeName: "SearchResult",
+        possibleTypeName: possibleTypeName
+    )
 }
 
 private func firstArgumentValue(in document: FastDocument) -> UInt32 {
@@ -207,6 +235,17 @@ private let measurements = [
             named: "person"
         ))
     },
+    measure("v1_schema_possible_type") {
+        benchmarkV1PossibleType(benchmarkSchema)
+    },
+    measure("v2_schema_possible_type") {
+        benchmarkV2PossibleType(
+            cachedBenchmarkSchema,
+            abstractType: benchmarkSearchResultTypeID,
+            matchingType: benchmarkPersonTypeID,
+            nonmatchingType: benchmarkQueryTypeID
+        )
+    },
     measure("v1_parse_malformed") {
         do {
             return try parse(source: malformedQuery, noLocation: true).definitions.count
@@ -258,7 +297,8 @@ private func makeBenchmarkSchema() throws -> GraphQLSchema {
             "people": GraphQLField(type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person)))),
         ]
     )
-    return try GraphQLSchema(query: query)
+    let searchResult = try GraphQLUnionType(name: "SearchResult", types: [person])
+    return try GraphQLSchema(query: query, types: [searchResult])
 }
 
 print("Release microbenchmark: \(warmup) warmups, \(iterations) iterations, \(sampleCount) samples")

@@ -12,9 +12,14 @@ import Testing
         #expect(compiled.namedTypes.count == metadata.types.count)
         #expect(compiled.fieldDefinitions.count == metadata.fields.count)
         #expect(compiled.inputDefaults.count == metadata.inputValues.count)
+        #expect(compiled.enumValueDefinitions.count == metadata.enumValues.count)
+        #expect(compiled.directiveDefinitions.count == metadata.directives.count)
 
         let queryID = try #require(metadata.typeID(named: "Query"))
         let personID = try #require(metadata.typeID(named: "Person"))
+        let nodeID = try #require(metadata.typeID(named: "Node"))
+        let searchResultID = try #require(metadata.typeID(named: "SearchResult"))
+        let episodeID = try #require(metadata.typeID(named: "Episode"))
         #expect(metadata.roots.query == queryID)
         #expect(metadata.roots.mutation == nil)
         #expect(metadata.roots.subscription == nil)
@@ -23,6 +28,20 @@ import Testing
         #expect(metadata.types[Int(try #require(metadata.typeID(named: "SearchResult")).rawValue)].kind == .union)
         #expect(metadata.types[Int(try #require(metadata.typeID(named: "Episode")).rawValue)].kind == .enum)
         #expect(metadata.types[Int(try #require(metadata.typeID(named: "PersonFilter")).rawValue)].kind == .inputObject)
+
+        let personInterfaces = metadata.types[Int(personID.rawValue)].interfaces
+        #expect(personInterfaces.count == 1)
+        #expect(metadata.typeMembers[Int(personInterfaces.start)] == nodeID)
+        let nodePossibleTypes = metadata.types[Int(nodeID.rawValue)].possibleTypes
+        #expect(nodePossibleTypes.count == 1)
+        #expect(metadata.typeMembers[Int(nodePossibleTypes.start)] == personID)
+        let unionPossibleTypes = metadata.types[Int(searchResultID.rawValue)].possibleTypes
+        #expect(unionPossibleTypes.count == 1)
+        #expect(metadata.typeMembers[Int(unionPossibleTypes.start)] == personID)
+
+        let episodeValues = metadata.types[Int(episodeID.rawValue)].enumValues
+        #expect(episodeValues.count == 1)
+        #expect(metadata.name(metadata.enumValues[Int(episodeValues.start)].name) == "NEWHOPE")
 
         let personFieldID = try #require(metadata.fieldID(on: queryID, named: "person"))
         let personField = metadata.fields[Int(personFieldID.rawValue)]
@@ -49,6 +68,14 @@ import Testing
         #expect(metadata.name(filter.name) == "filter")
         #expect(filter.hasDefaultValue)
         #expect(compiled.inputDefaults[Int(searchField.arguments.start)] == Map.dictionary([:]))
+
+        let includeID = try #require(metadata.directiveID(named: "include"))
+        let include = metadata.directives[Int(includeID.rawValue)]
+        #expect(include.locations.contains(.field))
+        #expect(include.locations.contains(.fragmentSpread))
+        #expect(include.locations.contains(.inlineFragment))
+        #expect(include.arguments.count == 1)
+        #expect(metadata.name(metadata.inputValues[Int(include.arguments.start)].name) == "if")
     }
 
     @Test func cachesOneImmutableCompiledView() throws {

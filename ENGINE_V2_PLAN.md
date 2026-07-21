@@ -43,8 +43,9 @@ Phase 2 compiled schema representation:
 - [x] Precompute nested named, list, and non-null type-reference shapes.
 - [x] Cache one immutable compiled view on the authoritative `GraphQLSchema`.
 - [x] Add schema compilation, cache acquisition, type lookup, and field lookup microbenchmarks.
-- [ ] Compile interface and union membership tables.
-- [ ] Compile enum values, directives, and remaining introspection metadata.
+- [x] Compile interface and union membership tables.
+- [x] Compile enum values and directive structure, arguments, locations, and repeatability.
+- [ ] Compile remaining descriptions, deprecation details, and introspection metadata.
 - [ ] Store resolver thunks directly alongside field records.
 - [ ] Compile every existing test schema or explicitly classify unsupported behavior.
 
@@ -311,6 +312,34 @@ schema was initially a large value struct while Engine V1 passed a class referen
 harness and using an immutable schema-lifetime reference reduced type lookup from 11.89 ns to
 10.05 ns and cached acquisition from 245.24 ns to 185.49 ns. The remaining 0.71 ns type-lookup
 difference is specific to temporary `String` dictionary lookup and is not the Phase 3 request path.
+
+### 2026-07-21: Phase 2 abstract-type and directive metadata
+
+- Added compact membership arenas for object interfaces, interface implementations, and union
+  members. Abstract-type checks now operate on numeric IDs without schema dictionary lookups or
+  lazy subtype-cache synchronization.
+- Added dense enum-value records and directive records containing arguments, location bitsets, and
+  repeatability. Existing definitions and default values remain available through aligned side
+  tables in the `GraphQL` adapter.
+- Added correctness coverage for object/interface relationships, interface and union possible
+  types, enum values, built-in directive arguments, and directive locations.
+- Full regression verification: 913 tests in 70 suites passed.
+
+| Abstract-type boundary | Engine V1 | Engine V2 | Speedup |
+| --- | ---: | ---: | ---: |
+| Possible-type check | 275.12 ns | 1.52 ns | 181.0x |
+
+The benchmark alternates a matching and nonmatching concrete type so the optimizer cannot hoist a
+constant result. It currently uses a one-member union and isolates only membership testing: Engine
+V1 performs string-based schema lookups and accesses its synchronized lazy subtype cache, while
+Engine V2 scans a precompiled numeric range. This is evidence for the representation, not an
+end-to-end request speedup claim. The expanded benchmark schema now compiles in 22,708.95 ns and
+cached-view acquisition is 197.46 ns; these figures are not directly comparable with the earlier
+smaller schema fixture.
+
+The next Phase 2 slice will classify the existing field resolver forms and store direct resolver
+thunks alongside compiled field metadata, followed by compilation across the broader test-schema
+corpus and explicit fallback classification for unsupported behavior.
 
 ## Phase 0: Baseline and Contracts
 

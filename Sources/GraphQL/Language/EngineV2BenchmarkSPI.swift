@@ -25,6 +25,18 @@ public func engineV1FieldLookupChecksum(
     return field.name.utf8.count
 }
 
+@_spi(EngineV2Benchmark)
+public func engineV1PossibleTypeChecksum(
+    _ schema: GraphQLSchema,
+    abstractTypeName: String,
+    possibleTypeName: String
+) -> Int {
+    guard let abstract = schema.getType(name: abstractTypeName) as? GraphQLAbstractType,
+          let possible = schema.getType(name: possibleTypeName)
+    else { return 0 }
+    return schema.isSubType(abstractType: abstract, maybeSubType: possible) ? 1 : 0
+}
+
 /// Adapts compact Engine V2 parser failures into the existing eager public error representation.
 /// This is SPI while the new engine remains disconnected from the public request path.
 @_spi(EngineV2Benchmark)
