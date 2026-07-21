@@ -50,14 +50,16 @@ gate produces an end-to-end number.
   source-only thunks and the specialized key-path (default) synchronous resolver; a custom
   synchronous resolver that could observe args/info falls back to Engine V1.
 - [~] Complete scalars, objects, lists, and non-null propagation into a preallocated result arena.
-  Scalar/object/non-null completion is done, but results are built directly into the public `Map`;
-  the preallocated arena and list completion remain the next optimization levers.
-- [~] Convert the arena once into the existing public `Map` result. Currently materializes `Map`
-  directly; the arena indirection is deferred.
+  Scalar, object, list, and non-null completion are all done. The preallocated arena was built and
+  measured as an 11–24% regression under the public `Map` contract and reverted (see the newest
+  arena progress entry); results are built directly into the public `Map`.
+- [x] Convert the arena once into the existing public `Map` result. Superseded: the direct-`Map`
+  path is faster than an arena-then-convert pass while the public result is `Map`.
 - [x] Differentially verify the supported query and relevant error/null behavior against Engine V1.
 - [~] Benchmark the complete `single_item` request with the same parsing, validation, execution,
-  and materialization contract as Rust. Benchmarked end to end against Engine V1; Engine V2 does not
-  yet run schema/document validation, so full-contract parity is still pending.
+  and materialization contract as Rust. Benchmarked end to end against Engine V1. Fused validation
+  has started: `invalid_field` now runs fully on Engine V2 with exact-parity errors; argument-value
+  validation for valid queries is still pending, so full-contract parity is not yet complete.
 - [~] Reach the viability gate of at most 2x the Rust baseline before resuming broad completeness.
   No Rust toolchain on the current host; measured relative to Engine V1 instead (see the newest
   progress entry), where the slice is ~17.7x faster than Engine V1 execute+materialize only.
@@ -104,17 +106,19 @@ means its implementation and proportionate verification are complete, not merely
   contract. Two hot-path optimizations (once-per-object source-container reuse; plan-time
   `String`/`ID` scalar fast path) instead cut `single_item` execute-only −25% and `list_items`
   execute-only −31%.
-- The next task is to close the honesty gap: add Engine V2 document/schema validation (or an
-  equivalence proof) so the comparison honors the full benchmark contract. Remaining execution
-  levers, ahead of any arena, are the `as? [(any Sendable)?]` array bridging cast and ARC on boxed
-  `any Sendable` values.
+- Fused validation has begun (Phase 3): the `invalid_field` case now runs entirely on Engine V2,
+  reproducing Engine V1's `FieldsOnCorrectType` error (message, suggestions, location, order) ~18.7x
+  faster, verified differentially. The next validation task is `invalid_type` — argument-value
+  coercion errors (`ValuesOfCorrectType`) — which is also what must land before the slice can accept
+  untrusted input; until then it stays SPI-only. Remaining execution levers are the
+  `as? [(any Sendable)?]` array bridging cast and ARC on boxed `any Sendable` values.
 - Do not resume broad Phase 2 completeness work merely to increase feature count. Tighten the
   `single_item`/`list_items` contract (validation) before widening to more cases.
 - Focused verification commands: `swift test --filter EngineV2ExecuteTests` and
   `swift test --filter FastCompiledSchemaTests`.
 - Full verification command: `swift test`.
 - Release microbenchmark command: `swift run -c release graphql-fast-benchmarks`.
-- Last verified state: 925 tests in 71 suites pass; no known correctness regression. Note the Linux
+- Last verified state: 930 tests in 71 suites pass; no known correctness regression. Note the Linux
   `CoreFoundation` import fix in `MapSerialization.swift` required to build on this host.
 - Read this checkpoint, the current milestone checklist, and the newest dated progress entry before
   editing. Inspect `git status` and recent history so user work is never overwritten.
@@ -197,6 +201,40 @@ Baseline metadata:
 - Pipeline: parse, validate, execute, and materialize the ordinary public result.
 
 ## Progress Log
+
+### 2026-07-21: Fused `invalid_field` validation path with exact Engine V1 parity
+
+The fused planner previously fell back to Engine V1 for any unknown field. It now detects an unknown
+field in leaf position during its single schema-aware traversal, records it, and — once the rest of
+the document has passed every structural check — reconstructs Engine V1's `FieldsOnCorrectType`
+result directly, with no validation visitor pass. Message parity is guaranteed by calling Engine
+V1's own `undefinedFieldMessage`, `getSuggestedTypeNames`, and `getSuggestedFieldNames`; location
+parity reuses the byte-position→`SourceLocation` conversion already proven against V1 by the
+parser-error tests. `compilePlan` now returns a `PlanOutcome` of `plan` / `validationErrors` /
+`fallback`, and `run` maps `validationErrors` to a data-less `GraphQLResult` exactly as Engine V1
+does on validation failure.
+
+Safety: an unknown field carrying a sub-selection still falls back (its absent type makes nested
+errors unvalidatable), and any other unsupported construct anywhere in the document forces a full
+fallback, so the fused error path can only fire when Engine V1 would have reported exactly these
+`FieldsOnCorrectType` errors and nothing else. This does not lift the slice's SPI-only status:
+argument-value coercion is still absent, so untrusted documents must not be gated on it yet.
+
+Differential coverage compares Engine V1 and Engine V2 on data, error messages, *and* source
+locations for: an unknown leaf field, a "Did you mean" suggestion (`nam` → `name`), an unknown
+top-level field, multiple unknown fields (report order and per-field locations), plus the
+unknown-field-with-sub-selection fallback. Full suite: 930 tests in 71 suites pass.
+
+| End-to-end `invalid_field` boundary | Median |
+| --- | ---: |
+| Engine V1 full `graphql(...)` (parse + full validation) | 153,727 ns |
+| Engine V2 fused planner (parse + fused validation, identical error) | 8,222 ns |
+
+Self-relative on the Linux x86_64 host; 1,000 warmups, 10,000 iterations/sample, 15 samples,
+SwiftPM release. Engine V2 reaches the same public validation result ~18.7x faster by fusing the
+check into planning rather than running the general visitor. This is the first case where Engine V2
+performs the *same* required work as Engine V1 (full document validation for this failure class)
+rather than deferring it, so the comparison is contract-honest for `invalid_field`.
 
 ### 2026-07-21: List completion, and the result-arena hypothesis retired by measurement
 
