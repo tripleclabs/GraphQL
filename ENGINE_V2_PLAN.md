@@ -43,11 +43,13 @@ Phase 0 and broader Phase 1 executable-document coverage:
 - [x] Implement the UTF-8 lexer.
 - [x] Differential-test lexer behavior against Engine V1.
 - [x] Parse all six benchmark documents with structural differential coverage.
-- [ ] Expand differential parsing across the existing executable-document corpus.
+- [x] Expand differential parsing across the existing executable-document corpus.
 - [x] Parse variable definitions and type references.
 - [x] Parse directives at executable-document locations.
 - [x] Parse list and object input values.
 - [x] Parse named fragment definitions.
+- [ ] Match decoded string and block-string value semantics.
+- [ ] Adapt compact parser failures into public `GraphQLError` parity.
 - [x] Add lexer and parser microbenchmark measurements.
 
 Status notes and benchmark evidence must be added to this document as work lands. A checked item
@@ -190,6 +192,15 @@ Engine V2 does not yet adapt its compact parse errors into the public `GraphQLEr
 - Post-expansion release measurements: 147.26 ns successful lex, 439.63 ns successful parse, and
   318.29 ns malformed parse.
 - Full regression verification: 903 tests in 68 suites passed.
+- Extended the differential corpus to 24 accepted/rejected executable documents drawn from the
+  existing parser tests, including malformed fragment syntax, invalid operation names, const
+  values containing variables, and empty selection sets.
+- Engine V2 now parses the repository's existing executable `kitchen-sink.graphql` document.
+- Corrected const-value parsing so variables are rejected in variable defaults while remaining
+  valid in ordinary field arguments.
+- Latest release measurements remained stable: 142.55 ns successful lex, 429.25 ns successful
+  parse, and 310.82 ns malformed parse.
+- Full regression verification after the corpus expansion: 904 tests in 68 suites passed.
 
 ## Phase 0: Baseline and Contracts
 

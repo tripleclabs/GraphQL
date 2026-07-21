@@ -1,5 +1,6 @@
 @testable import GraphQL
 import GraphQLFast
+import Foundation
 import Testing
 
 @Suite struct FastParserTests {
@@ -61,6 +62,23 @@ import Testing
         #expect(document.values.contains { $0.kind == .list })
         #expect(document.values.contains { $0.kind == .object })
     }
+
+    @Test func parsesExistingExecutableKitchenSink() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let url = testsDirectory
+            .appendingPathComponent("GraphQLTests")
+            .appendingPathComponent("LanguageTests")
+            .appendingPathComponent("kitchen-sink.graphql")
+        let source = try String(contentsOf: url, encoding: .utf8)
+
+        let reference = try parse(source: source, noLocation: true)
+        let fast = try FastParser.parse(source)
+        #expect(reference.definitions.count == fast.operations.count + fast.fragments.count)
+        #expect(fast.operations.count == 4)
+        #expect(fast.fragments.count == 1)
+    }
 }
 
 private let executableFeatureCorpus = [
@@ -79,6 +97,15 @@ private let executableFeatureCorpus = [
     "query Q($id ID) { field }",
     "fragment on Person { id }",
     "query Q { field(arg: [1, 2) }",
+    "query Q($value: Input = { nested: [$illegal] }) { field }",
+    "query Q { empty {} }",
+    "{ ...MissingOn }\nfragment MissingOn Type\n",
+    "notanoperation Foo { field }",
+    "...",
+    "query",
+    "fragment on on on { on }",
+    "{ ...on }",
+    "{ field(complex: { a: { b: [ $var ] } }) }",
 ]
 
 private let benchmarkSuccessQueries = [

@@ -150,7 +150,7 @@ private struct Parser {
             var defaultValue: UInt32?
             if current.kind == .equals {
                 _ = advance()
-                defaultValue = try parseValue()
+                defaultValue = try parseValue(isConst: true)
             }
             let directives = try parseDirectives()
             document.variableDefinitions.append(FastVariableDefinition(
@@ -208,6 +208,10 @@ private struct Parser {
             firstSelection: nil,
             selectionCount: 0
         ))
+
+        if current.kind == .rightBrace {
+            throw parseError(.expectedName)
+        }
 
         var previous: UInt32?
         while current.kind != .rightBrace {
@@ -328,11 +332,12 @@ private struct Parser {
         )
     }
 
-    mutating func parseValue() throws -> UInt32 {
+    mutating func parseValue(isConst: Bool = false) throws -> UInt32 {
         let token = current
         let kind: FastValue.Kind
         switch token.kind {
         case .dollar:
+            if isConst { throw parseError(.expectedValue) }
             _ = advance()
             let name = try expectName()
             let range = FastSourceRange(start: token.range.start, end: name.range.end)
@@ -356,9 +361,9 @@ private struct Parser {
                 kind = .enum
             }
         case .leftBracket:
-            return try parseListValue()
+            return try parseListValue(isConst: isConst)
         case .leftBrace:
-            return try parseObjectValue()
+            return try parseObjectValue(isConst: isConst)
         default:
             throw parseError(.expectedValue)
         }
@@ -373,7 +378,7 @@ private struct Parser {
         return UInt32(document.values.count - 1)
     }
 
-    mutating func parseListValue() throws -> UInt32 {
+    mutating func parseListValue(isConst: Bool) throws -> UInt32 {
         let startToken = advance()
         let listID = appendValuePlaceholder(kind: .list, start: startToken.range.start)
         var firstChild: UInt32?
@@ -381,7 +386,7 @@ private struct Parser {
         var count: UInt32 = 0
         while current.kind != .rightBracket {
             if current.kind == .eof { throw parseError(.expected(.rightBracket)) }
-            let child = try parseValue()
+            let child = try parseValue(isConst: isConst)
             if let previous {
                 document.values[Int(previous)].nextSibling = child
             } else {
@@ -401,7 +406,7 @@ private struct Parser {
         return listID
     }
 
-    mutating func parseObjectValue() throws -> UInt32 {
+    mutating func parseObjectValue(isConst: Bool) throws -> UInt32 {
         let startToken = advance()
         let objectID = appendValuePlaceholder(kind: .object, start: startToken.range.start)
         var firstField: UInt32?
@@ -411,7 +416,7 @@ private struct Parser {
             if current.kind == .eof { throw parseError(.expected(.rightBrace)) }
             let name = try expectName().range
             _ = try expect(.colon)
-            let value = try parseValue()
+            let value = try parseValue(isConst: isConst)
             let fieldID = UInt32(document.objectFields.count)
             document.objectFields.append(FastObjectField(
                 name: name,
