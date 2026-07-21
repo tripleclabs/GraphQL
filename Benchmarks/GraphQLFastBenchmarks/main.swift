@@ -20,6 +20,21 @@ query Malformed {
     name
 """
 
+private let escapedStringQuery = #"{ field(value: "quote: \" slash: \/ backslash: \\ tab: \t newline: \n") }"#
+private let blockStringQuery = #"""
+{
+  field(value: """
+    first
+      second
+    third
+  """)
+}
+"""#
+
+private let parsedSuccessfulQuery = try! FastParser.parse(successfulQuery)
+private let parsedEscapedStringQuery = try! FastParser.parse(escapedStringQuery)
+private let parsedBlockStringQuery = try! FastParser.parse(blockStringQuery)
+
 private let environment = ProcessInfo.processInfo.environment
 private let warmup = Int(environment["WARMUP"] ?? "1000") ?? 1000
 private let iterations = Int(environment["ITERATIONS"] ?? "10000") ?? 10000
@@ -78,6 +93,15 @@ private func consumeFastDocument(_ document: FastDocument) -> Int {
     return checksum
 }
 
+@inline(never)
+private func consumeString(_ string: String) -> Int {
+    withExtendedLifetime(string) { string.utf8.count }
+}
+
+private func firstArgumentValue(in document: FastDocument) -> UInt32 {
+    document.arguments[0].value
+}
+
 private func measure(
     _ name: String,
     operation: () throws -> Int
@@ -113,6 +137,27 @@ private let measurements = [
     measure("v2_parse_success") {
         try consumeFastDocument(FastParser.parse(successfulQuery))
     },
+    measure("v2_parse_success_with_string_decode") {
+        let document = try FastParser.parse(successfulQuery)
+        return try consumeFastDocument(document) &+ consumeString(document.decodedString(
+            valueAt: firstArgumentValue(in: document)
+        ))
+    },
+    measure("v2_decode_string_plain") {
+        try consumeString(parsedSuccessfulQuery.decodedString(
+            valueAt: firstArgumentValue(in: parsedSuccessfulQuery)
+        ))
+    },
+    measure("v2_decode_string_escaped") {
+        try consumeString(parsedEscapedStringQuery.decodedString(
+            valueAt: firstArgumentValue(in: parsedEscapedStringQuery)
+        ))
+    },
+    measure("v2_decode_block_string") {
+        try consumeString(parsedBlockStringQuery.decodedString(
+            valueAt: firstArgumentValue(in: parsedBlockStringQuery)
+        ))
+    },
     measure("v1_parse_malformed") {
         do {
             return try parse(source: malformedQuery, noLocation: true).definitions.count
@@ -120,11 +165,18 @@ private let measurements = [
             return consumeError(error)
         }
     },
-    measure("v2_parse_malformed") {
+    measure("v2_parse_malformed_raw") {
         do {
             return try FastParser.parse(malformedQuery).operations.count
         } catch {
             return consumeError(error)
+        }
+    },
+    measure("v2_parse_malformed_public_error") {
+        do {
+            return try FastParser.parse(malformedQuery).operations.count
+        } catch {
+            return consumeError(engineV2PublicParseError(error, source: malformedQuery))
         }
     },
 ]

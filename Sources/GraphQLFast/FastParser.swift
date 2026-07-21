@@ -1,6 +1,7 @@
 public struct FastParseError: Error, Sendable, Equatable, CustomStringConvertible {
     public let position: UInt32
     public let reason: Reason
+    public let found: FastToken
 
     public enum Reason: Sendable, Equatable {
         case expected(FastTokenKind)
@@ -216,7 +217,7 @@ private struct Parser {
         var previous: UInt32?
         while current.kind != .rightBrace {
             if current.kind == .eof {
-                throw parseError(.expected(.rightBrace))
+                throw parseError(.expectedName)
             }
             let selectionID = try parseSelection()
             if let previous {
@@ -507,6 +508,7 @@ private struct Parser {
         _ reason: FastParseError.Reason,
         at token: FastToken? = nil
     ) -> FastParseError {
-        FastParseError(position: (token ?? current).range.start, reason: reason)
+        let found = token ?? current
+        return FastParseError(position: found.range.start, reason: reason, found: found)
     }
 }

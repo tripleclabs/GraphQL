@@ -1,4 +1,4 @@
-@testable import GraphQL
+@_spi(EngineV2Benchmark) @testable import GraphQL
 import GraphQLFast
 import Foundation
 import Testing
@@ -78,6 +78,28 @@ import Testing
         #expect(reference.definitions.count == fast.operations.count + fast.fragments.count)
         #expect(fast.operations.count == 4)
         #expect(fast.fragments.count == 1)
+    }
+
+    @Test(arguments: [
+        "{",
+        "query Broken { field",
+        "notanoperation Foo { field }",
+    ])
+    func adaptedPublicErrorsMatchReference(source: String) throws {
+        let reference = try capturedGraphQLError {
+            try parse(source: source)
+        }
+        let fast = try capturedGraphQLError {
+            do {
+                _ = try FastParser.parse(source)
+            } catch {
+                throw engineV2PublicParseError(error, source: source)
+            }
+        }
+
+        #expect(fast.message == reference.message)
+        #expect(fast.positions == reference.positions)
+        #expect(fast.locations == reference.locations)
     }
 }
 
@@ -284,4 +306,20 @@ private func normalize(
 
 private func slice(_ bytes: [UInt8], _ range: FastSourceRange) -> String {
     String(decoding: bytes[Int(range.start) ..< Int(range.end)], as: UTF8.self)
+}
+
+private enum ExpectedError: Error {
+    case noneThrown
+    case wrongType(any Error)
+}
+
+private func capturedGraphQLError<T>(_ operation: () throws -> T) throws -> GraphQLError {
+    do {
+        _ = try operation()
+        throw ExpectedError.noneThrown
+    } catch let error as GraphQLError {
+        return error
+    } catch {
+        throw ExpectedError.wrongType(error)
+    }
 }

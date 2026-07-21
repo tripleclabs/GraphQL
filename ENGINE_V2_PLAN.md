@@ -48,7 +48,7 @@ Phase 0 and broader Phase 1 executable-document coverage:
 - [x] Parse directives at executable-document locations.
 - [x] Parse list and object input values.
 - [x] Parse named fragment definitions.
-- [ ] Match decoded string and block-string value semantics.
+- [x] Match decoded string and block-string value semantics.
 - [ ] Adapt compact parser failures into public `GraphQLError` parity.
 - [x] Add lexer and parser microbenchmark measurements.
 
@@ -201,6 +201,50 @@ Engine V2 does not yet adapt its compact parse errors into the public `GraphQLEr
 - Latest release measurements remained stable: 142.55 ns successful lex, 429.25 ns successful
   parse, and 310.82 ns malformed parse.
 - Full regression verification after the corpus expansion: 904 tests in 68 suites passed.
+
+### 2026-07-21: Public parser-error boundary
+
+- Added compact parse errors carrying the found token and byte position needed for later adaptation.
+- Added an SPI adapter that constructs the existing highlighted `GraphQLError` without connecting
+  Engine V2 to the public request path.
+- Added exact message, byte-position, and line/column parity tests for representative missing-name,
+  unterminated-selection, and invalid-operation failures.
+- Split malformed parsing into raw and public-error-adapted microbenchmarks.
+
+| Malformed parser boundary | Median |
+| --- | ---: |
+| Engine V1 public parser failure | 4,223.71 ns |
+| Engine V2 raw parser failure | 310.56 ns |
+| Engine V2 with public `GraphQLError` | 3,190.77 ns |
+
+The compact parser is 13.6x faster at identifying the failure, but existing highlighted error
+construction adds approximately 2.88 us and now dominates the Engine V2 malformed path. Public
+error formatting must therefore receive its own optimization work before end-to-end cutover.
+
+### 2026-07-21: Lazy string-value decoding
+
+- Added on-demand decoding for ordinary and block string values without adding allocated strings
+  to the compact parser arenas.
+- Ordinary unescaped strings decode directly from the source's contiguous UTF-8 storage. Escapes,
+  Unicode escapes, block indentation normalization, and escaped triple quotes are processed only
+  when a consumer requests the value.
+- Added differential tests against Engine V1 for seven ordinary and block-string cases, including
+  mixed CRLF/CR newline forms, plus invalid-access tests.
+- Added separate release microbenchmarks so this semantic boundary remains visible rather than
+  being folded invisibly into parser timing.
+
+| Engine V2 string boundary | Median |
+| --- | ---: |
+| Plain string decode | 7.81 ns |
+| Escaped string decode | 191.80 ns |
+| Block string decode and normalization | 335.32 ns |
+
+The same release run measured successful parsing at 430.23 ns, parsing plus the required plain
+string decode at 433.86 ns, and raw malformed parsing at 310.34 ns. Adding the lazy accessor did
+not regress the compact parser hot path. Engine V1, whose lexer eagerly decodes token values,
+measured 2,587.04 ns at the directly comparable successful-parse boundary.
+- Full regression verification after the public-error and lazy-string milestones: 907 tests in 69
+  suites passed.
 
 ## Phase 0: Baseline and Contracts
 
