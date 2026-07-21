@@ -83,6 +83,67 @@ import Testing
         #expect(fast.errors.map(\.message).sorted() == reference.errors.map(\.message).sorted())
     }
 
+    /// Runs an invalid query through both engines and asserts the fast path reproduced Engine V1's
+    /// validation result exactly: no data, and identical error messages *and* source locations in
+    /// the same order.
+    static func expectValidationMatch(query: String) async throws {
+        let schema = try makeSchema()
+        let reference = try await graphql(schema: schema, request: query)
+        let fast = try #require(
+            engineV2ExecuteSingleItem(schema, query),
+            "Engine V2 should reproduce this validation failure"
+        )
+        #expect(fast.data == reference.data)
+        #expect(fast.errors.map(\.message) == reference.errors.map(\.message))
+        #expect(
+            fast.errors.map { $0.locations.map { [$0.line, $0.column] } }
+                == reference.errors.map { $0.locations.map { [$0.line, $0.column] } }
+        )
+    }
+
+    @Test func matchesEngineV1OnUnknownLeafField() async throws {
+        try await Self.expectValidationMatch(query: """
+        query InvalidField {
+          person(id: "1") {
+            id
+            name
+            unknownField
+          }
+        }
+        """)
+    }
+
+    @Test func matchesEngineV1OnUnknownFieldSuggestion() async throws {
+        // "nam" is close enough to "name" to trigger Engine V1's "Did you mean" suggestion.
+        try await Self.expectValidationMatch(query: """
+        query InvalidFieldTypo {
+          person(id: "1") { id nam }
+        }
+        """)
+    }
+
+    @Test func matchesEngineV1OnUnknownTopLevelField() async throws {
+        try await Self.expectValidationMatch(query: "query { unknownTop }")
+    }
+
+    @Test func matchesEngineV1OnMultipleUnknownFields() async throws {
+        // Two unknown fields must be reported in document order with correct per-field locations.
+        try await Self.expectValidationMatch(query: """
+        query {
+          person(id: "1") { id bogusOne bogusTwo }
+        }
+        """)
+    }
+
+    @Test func fallsBackForUnknownFieldWithSubselection() throws {
+        // An unknown field carrying a selection set cannot be validated for nested errors, so the
+        // fast path must defer to Engine V1 rather than emit a partial result.
+        #expect(engineV2ExecuteSingleItem(
+            try Self.makeSchema(),
+            "query { person(id: \"1\") { id mystery { x } } }"
+        ) == nil)
+    }
+
     static let fullPerson: [String: any Sendable] = [
         "person": [
             "id": "1",
@@ -201,10 +262,9 @@ import Testing
         #expect(engineV2ExecuteSingleItem(schema, query, rootValue: Self.fullPerson) == nil)
     }
 
-    @Test func fallsBackForUnknownField() throws {
-        let schema = try Self.makeSchema()
-        let query = "query { person(id: \"1\") { id notAField } }"
-        #expect(engineV2ExecuteSingleItem(schema, query, rootValue: Self.fullPerson) == nil)
+    @Test func reproducesUnknownLeafFieldValidation() async throws {
+        // Previously a fallback; the fused validation path now reproduces the Engine V1 error.
+        try await Self.expectValidationMatch(query: "query { person(id: \"1\") { id notAField } }")
     }
 
     @Test func fallsBackForMissingRequiredArgument() throws {

@@ -137,7 +137,10 @@ private func fastSyntaxError(
     )
 }
 
-private func fastSourceLocation(
+/// Converts a UTF-8 byte position into an Engine V1-compatible `SourceLocation`. Shared with the
+/// Engine V2 fused validation path; parity with V1's `getLocation` is covered by the parser-error
+/// location tests.
+func fastSourceLocation(
     source: String,
     position: Int
 ) -> SourceLocation {

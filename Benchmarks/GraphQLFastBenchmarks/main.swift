@@ -60,6 +60,15 @@ query ListItems {
   }
 }
 """
+private let invalidFieldQuery = """
+query InvalidField {
+  person(id: "1") {
+    id
+    name
+    unknownField
+  }
+}
+"""
 private let cachedBenchmarkSchema = try! engineV2CachedSchema(benchmarkSchema)
 private let benchmarkQueryTypeID = cachedBenchmarkSchema.typeID(named: "Query")!
 private let benchmarkSearchResultTypeID = cachedBenchmarkSchema.typeID(named: "SearchResult")!
@@ -499,6 +508,22 @@ private let v2ListExecuteOnly = measure("v2_execute_list_items_execute_only") {
 private let listShapeMaterialize = measure("map_build_list_items_shape_floor") {
     consumeMap(buildListItemsShape())
 }
+// End-to-end `invalid_field`: Engine V1 runs full document validation to produce the error; the
+// Engine V2 fused planner reproduces the same `FieldsOnCorrectType` error without a visitor pass.
+private let v1InvalidFieldEndToEnd = await measureAsync("v1_execute_invalid_field_e2e") {
+    consumeResult(try? await graphql(
+        schema: benchmarkSchema,
+        request: invalidFieldQuery,
+        rootValue: benchmarkRootValue
+    ))
+}
+private let v2InvalidFieldEndToEnd = measure("v2_execute_invalid_field_e2e") {
+    consumeResult(engineV2ExecuteSingleItem(
+        benchmarkSchema,
+        invalidFieldQuery,
+        rootValue: benchmarkRootValue
+    ))
+}
 private let endToEndMeasurements = [
     v1EndToEnd,
     v1ExecuteOnly,
@@ -509,6 +534,8 @@ private let endToEndMeasurements = [
     v2ListEndToEnd,
     v2ListExecuteOnly,
     listShapeMaterialize,
+    v1InvalidFieldEndToEnd,
+    v2InvalidFieldEndToEnd,
 ]
 
 print("Release microbenchmark: \(warmup) warmups, \(iterations) iterations, \(sampleCount) samples")

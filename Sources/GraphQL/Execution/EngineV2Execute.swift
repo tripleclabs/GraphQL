@@ -49,42 +49,79 @@ enum EngineV2Execute {
         let fields: [PlanField]
     }
 
-    /// Compiles the request into an execution plan, or returns `nil` when the document is not
-    /// eligible and Engine V1 must handle it. Parsing, name-to-numeric resolution, and structural
-    /// validation all happen here in one pass.
+    /// Compiles the request into a plan outcome. Parsing, name-to-numeric resolution, and structural
+    /// validation all happen here in one pass. `.fallback` means Engine V1 must handle the document.
     static func compilePlan(
         schema: GraphQLSchema,
         request: String,
         variableValues: [String: Map],
         operationName: String?
-    ) -> Plan? {
+    ) -> PlanOutcome {
         // The slice does not yet coerce variables.
-        guard variableValues.isEmpty else { return nil }
-        guard let compiled = try? schema.engineV2CompiledSchema() else { return nil }
-        guard let document = try? FastParser.parse(request) else { return nil }
+        guard variableValues.isEmpty else { return .fallback }
+        guard let compiled = try? schema.engineV2CompiledSchema() else { return .fallback }
+        guard let document = try? FastParser.parse(request) else { return .fallback }
 
         // Structural eligibility: exactly one query operation, no fragments, no operation-level
         // variables or directives.
-        guard document.fragments.isEmpty, document.operations.count == 1 else { return nil }
+        guard document.fragments.isEmpty, document.operations.count == 1 else { return .fallback }
         let operation = document.operations[0]
-        guard operation.kind == .query else { return nil }
+        guard operation.kind == .query else { return .fallback }
         guard operation.variableDefinitions.count == 0, operation.directives.count == 0 else {
-            return nil
+            return .fallback
         }
         if let operationName {
             guard let nameRange = operation.name, document.text(nameRange) == operationName
-            else { return nil }
+            else { return .fallback }
         }
 
-        guard let queryTypeID = compiled.metadata.roots.query else { return nil }
-        guard compiled.namedTypes[Int(queryTypeID.rawValue)] is GraphQLObjectType else { return nil }
+        guard let queryTypeID = compiled.metadata.roots.query else { return .fallback }
+        guard compiled.namedTypes[Int(queryTypeID.rawValue)] is GraphQLObjectType
+        else { return .fallback }
 
-        var planner = Planner(document: document, compiled: compiled)
+        let planner = Planner(document: document, compiled: compiled)
         guard let fields = planner.planSelectionSet(
             operation.selectionSet,
             parentType: queryTypeID
-        ) else { return nil }
-        return Plan(fields: fields)
+        ) else { return .fallback }
+
+        // Unknown fields dominate: if any were found, the document is invalid, so no execution plan
+        // is produced. The remainder passed every structural check, so Engine V1 would report only
+        // these `FieldsOnCorrectType` errors — which are reconstructed here with exact parity.
+        if !planner.undefinedFields.isEmpty {
+            return .validationErrors(planner.undefinedFields.map {
+                undefinedFieldError($0, schema: schema, source: request)
+            })
+        }
+        return .plan(Plan(fields: fields))
+    }
+
+    /// Reconstructs Engine V1's `FieldsOnCorrectType` error for an unknown field, reusing V1's own
+    /// message and suggestion helpers and the shared byte-position-to-`SourceLocation` conversion so
+    /// the message, "Did you mean" suggestions, and source location match exactly.
+    private static func undefinedFieldError(
+        _ field: UndefinedField,
+        schema: GraphQLSchema,
+        source: String
+    ) -> GraphQLError {
+        let suggestedTypeNames = (try? getSuggestedTypeNames(
+            schema: schema,
+            type: field.parentType,
+            fieldName: field.fieldName
+        )) ?? []
+        let suggestedFieldNames = suggestedTypeNames.isEmpty ? getSuggestedFieldNames(
+            schema: schema,
+            type: field.parentType,
+            fieldName: field.fieldName
+        ) : []
+        let message = undefinedFieldMessage(
+            fieldName: field.fieldName,
+            type: field.parentTypeName,
+            suggestedTypeNames: suggestedTypeNames,
+            suggestedFieldNames: suggestedFieldNames
+        )
+        let location = fastSourceLocation(source: source, position: field.position)
+        return GraphQLError(message: message, locations: [location])
     }
 
     /// Executes a precompiled plan against a root value and materializes the public result.
@@ -104,7 +141,8 @@ enum EngineV2Execute {
     }
 
     /// Executes the request through the fast path, or returns `nil` when the document is not
-    /// eligible and Engine V1 must handle it.
+    /// eligible and Engine V1 must handle it. An invalid document the fast path reproduces exactly
+    /// returns a `GraphQLResult` carrying the validation errors and no data, as Engine V1 does.
     static func run(
         schema: GraphQLSchema,
         request: String,
@@ -112,21 +150,59 @@ enum EngineV2Execute {
         variableValues: [String: Map],
         operationName: String?
     ) -> GraphQLResult? {
-        guard let plan = compilePlan(
+        switch compilePlan(
             schema: schema,
             request: request,
             variableValues: variableValues,
             operationName: operationName
-        ) else { return nil }
-        return execute(plan: plan, rootValue: rootValue)
+        ) {
+        case let .plan(plan):
+            return execute(plan: plan, rootValue: rootValue)
+        case let .validationErrors(errors):
+            return GraphQLResult(errors: errors)
+        case .fallback:
+            return nil
+        }
     }
 
     // MARK: - Planning
 
-    private struct Planner {
+    /// Outcome of fusing parse, name resolution, and structural validation for one request.
+    enum PlanOutcome {
+        /// The document is fully executable on the fast path.
+        case plan(Plan)
+        /// The document is invalid in a way the fast path reproduces exactly (currently unknown
+        /// fields); these errors match Engine V1's message, suggestions, and source location.
+        case validationErrors([GraphQLError])
+        /// The document uses a construct the fast path cannot prove equivalent; Engine V1 handles it.
+        case fallback
+    }
+
+    /// A field that does not exist on its parent type, captured during planning so the exact Engine
+    /// V1 `FieldsOnCorrectType` error can be reconstructed after the traversal.
+    private struct UndefinedField {
+        let fieldName: String
+        let parentType: GraphQLOutputType
+        let parentTypeName: String
+        let position: Int
+    }
+
+    private final class Planner {
         let document: FastDocument
         let compiled: EngineV2CompiledSchema
+        /// Unknown fields found in leaf position, in document (pre-order) order, matching the order
+        /// Engine V1's validation visitor reports them.
+        var undefinedFields: [UndefinedField] = []
 
+        init(document: FastDocument, compiled: EngineV2CompiledSchema) {
+            self.document = document
+            self.compiled = compiled
+        }
+
+        /// Returns the planned fields, or `nil` when the selection set uses an unsupported construct
+        /// and the whole request must fall back to Engine V1. An unknown field in leaf position is
+        /// *not* a fallback: it is recorded in `undefinedFields` and skipped so planning can confirm
+        /// the remainder of the document is otherwise fully supported before emitting the error.
         func planSelectionSet(
             _ selectionSetIndex: UInt32,
             parentType: FastSchemaTypeID
@@ -137,6 +213,10 @@ enum EngineV2Execute {
             var fields: [PlanField] = []
             fields.reserveCapacity(Int(set.selectionCount))
             var seenKeys = Set<String>()
+
+            let parentTypeName = compiled.metadata.name(
+                compiled.metadata.types[Int(parentType.rawValue)].name
+            )
 
             var cursor = set.firstSelection
             while let index = cursor {
@@ -154,7 +234,21 @@ enum EngineV2Execute {
                 guard seenKeys.insert(responseKey).inserted else { return nil }
 
                 guard let fieldID = compiled.metadata.fieldID(on: parentType, named: fieldName)
-                else { return nil }
+                else {
+                    // Unknown field. Only a leaf-position unknown field can be reproduced exactly:
+                    // one whose absent type would make any child selection unvalidatable, so a child
+                    // selection here forces a fallback rather than risk missing nested errors.
+                    guard selection.selectionSet == nil else { return nil }
+                    let parentType = compiled.namedTypes[Int(parentType.rawValue)]
+                    guard let parentOutputType = parentType as? GraphQLOutputType else { return nil }
+                    undefinedFields.append(UndefinedField(
+                        fieldName: fieldName,
+                        parentType: parentOutputType,
+                        parentTypeName: parentTypeName,
+                        position: Int(selection.alias?.start ?? nameRange.start)
+                    ))
+                    continue
+                }
                 let schemaField = compiled.metadata.fields[Int(fieldID.rawValue)]
 
                 guard validateArguments(selection.arguments, schemaField: schemaField) else {
@@ -163,9 +257,6 @@ enum EngineV2Execute {
 
                 guard let resolver = planResolver(fieldID: fieldID) else { return nil }
 
-                let parentTypeName = compiled.metadata.name(
-                    compiled.metadata.types[Int(parentType.rawValue)].name
-                )
                 guard let completion = planCompletion(
                     typeReference: schemaField.type,
                     childSelectionSet: selection.selectionSet
@@ -482,12 +573,15 @@ public func engineV2CompileSingleItemPlan(
     _ schema: GraphQLSchema,
     _ request: String
 ) -> EngineV2BenchmarkPlan? {
-    EngineV2Execute.compilePlan(
+    if case let .plan(plan) = EngineV2Execute.compilePlan(
         schema: schema,
         request: request,
         variableValues: [:],
         operationName: nil
-    ).map(EngineV2BenchmarkPlan.init)
+    ) {
+        return EngineV2BenchmarkPlan(plan: plan)
+    }
+    return nil
 }
 
 @_spi(EngineV2Benchmark)
