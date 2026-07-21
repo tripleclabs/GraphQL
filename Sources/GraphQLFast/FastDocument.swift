@@ -36,18 +36,28 @@ public struct FastArenaRange: Sendable, Hashable {
 public struct FastDocument: Sendable {
     public let source: String
     public internal(set) var operations: ContiguousArray<FastOperation>
+    public internal(set) var fragments: ContiguousArray<FastFragment>
+    public internal(set) var variableDefinitions: ContiguousArray<FastVariableDefinition>
+    public internal(set) var types: ContiguousArray<FastTypeReference>
+    public internal(set) var directives: ContiguousArray<FastDirective>
     public internal(set) var selectionSets: ContiguousArray<FastSelectionSet>
     public internal(set) var selections: ContiguousArray<FastSelection>
     public internal(set) var arguments: ContiguousArray<FastArgument>
     public internal(set) var values: ContiguousArray<FastValue>
+    public internal(set) var objectFields: ContiguousArray<FastObjectField>
 
     public init(source: String) {
         self.source = source
         operations = []
+        fragments = []
+        variableDefinitions = []
+        types = []
+        directives = []
         selectionSets = []
         selections = []
         arguments = []
         values = []
+        objectFields = []
     }
 }
 
@@ -61,7 +71,44 @@ public struct FastOperation: Sendable {
 
     public let kind: Kind
     public let name: FastSourceRange?
+    public let variableDefinitions: FastArenaRange
+    public let directives: FastArenaRange
     public let selectionSet: UInt32
+}
+
+@frozen
+public struct FastFragment: Sendable {
+    public let name: FastSourceRange
+    public let typeCondition: FastSourceRange
+    public let directives: FastArenaRange
+    public let selectionSet: UInt32
+}
+
+@frozen
+public struct FastVariableDefinition: Sendable {
+    public let name: FastSourceRange
+    public let type: UInt32
+    public let defaultValue: UInt32?
+    public let directives: FastArenaRange
+}
+
+@frozen
+public struct FastTypeReference: Sendable {
+    public enum Kind: UInt8, Sendable {
+        case named
+        case list
+        case nonNull
+    }
+
+    public let kind: Kind
+    public let name: FastSourceRange?
+    public let wrappedType: UInt32?
+}
+
+@frozen
+public struct FastDirective: Sendable {
+    public let name: FastSourceRange
+    public let arguments: FastArenaRange
 }
 
 @frozen
@@ -82,6 +129,7 @@ public struct FastSelection: Sendable {
     public let name: FastSourceRange?
     public let alias: FastSourceRange?
     public let arguments: FastArenaRange
+    public let directives: FastArenaRange
     public let selectionSet: UInt32?
     public let typeCondition: FastSourceRange?
     public internal(set) var nextSibling: UInt32?
@@ -109,5 +157,14 @@ public struct FastValue: Sendable {
 
     public let kind: Kind
     public let source: FastSourceRange
-    public let children: FastArenaRange
+    public let firstChild: UInt32?
+    public let childCount: UInt32
+    public internal(set) var nextSibling: UInt32?
+}
+
+@frozen
+public struct FastObjectField: Sendable {
+    public let name: FastSourceRange
+    public let value: UInt32
+    public internal(set) var nextSibling: UInt32?
 }

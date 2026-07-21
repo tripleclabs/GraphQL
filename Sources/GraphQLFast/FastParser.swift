@@ -64,9 +64,13 @@ private struct Parser {
 
     mutating func parseDocument() throws -> FastDocument {
         while current.kind != .eof {
-            try parseOperation()
+            if current.kind == .name, matches(current, "fragment") {
+                try parseFragmentDefinition()
+            } else {
+                try parseOperation()
+            }
         }
-        guard !document.operations.isEmpty else {
+        guard !document.operations.isEmpty || !document.fragments.isEmpty else {
             throw parseError(.expected(.leftBrace))
         }
         return document
@@ -78,6 +82,8 @@ private struct Parser {
             document.operations.append(FastOperation(
                 kind: .query,
                 name: nil,
+                variableDefinitions: .empty,
+                directives: .empty,
                 selectionSet: selectionSet
             ))
             return
@@ -99,18 +105,100 @@ private struct Parser {
         if current.kind == .name {
             name = advance().range
         }
-        if current.kind == .leftParenthesis {
-            throw parseError(.unsupported("variable definitions"))
-        }
-        if current.kind == .at {
-            throw parseError(.unsupported("operation directives"))
-        }
+        let variableDefinitions = try parseVariableDefinitions()
+        let directives = try parseDirectives()
         let selectionSet = try parseSelectionSet()
         document.operations.append(FastOperation(
             kind: operationKind,
             name: name,
+            variableDefinitions: variableDefinitions,
+            directives: directives,
             selectionSet: selectionSet
         ))
+    }
+
+    mutating func parseFragmentDefinition() throws {
+        _ = advance() // fragment
+        let name = try expectName()
+        if matches(name, "on") {
+            throw parseError(.expectedName, at: name)
+        }
+        let on = try expectName()
+        guard matches(on, "on") else {
+            throw parseError(.expectedName, at: on)
+        }
+        let typeCondition = try expectName().range
+        let directives = try parseDirectives()
+        let selectionSet = try parseSelectionSet()
+        document.fragments.append(FastFragment(
+            name: name.range,
+            typeCondition: typeCondition,
+            directives: directives,
+            selectionSet: selectionSet
+        ))
+    }
+
+    mutating func parseVariableDefinitions() throws -> FastArenaRange {
+        guard current.kind == .leftParenthesis else { return .empty }
+        _ = advance()
+        let start = UInt32(document.variableDefinitions.count)
+        while current.kind != .rightParenthesis {
+            _ = try expect(.dollar)
+            let name = try expectName().range
+            _ = try expect(.colon)
+            let type = try parseTypeReference()
+            var defaultValue: UInt32?
+            if current.kind == .equals {
+                _ = advance()
+                defaultValue = try parseValue()
+            }
+            let directives = try parseDirectives()
+            document.variableDefinitions.append(FastVariableDefinition(
+                name: name,
+                type: type,
+                defaultValue: defaultValue,
+                directives: directives
+            ))
+        }
+        _ = advance()
+        return FastArenaRange(
+            start: start,
+            count: UInt32(document.variableDefinitions.count) - start
+        )
+    }
+
+    mutating func parseTypeReference() throws -> UInt32 {
+        let typeID: UInt32
+        if current.kind == .leftBracket {
+            _ = advance()
+            let wrappedType = try parseTypeReference()
+            _ = try expect(.rightBracket)
+            typeID = UInt32(document.types.count)
+            document.types.append(FastTypeReference(
+                kind: .list,
+                name: nil,
+                wrappedType: wrappedType
+            ))
+        } else {
+            let name = try expectName().range
+            typeID = UInt32(document.types.count)
+            document.types.append(FastTypeReference(
+                kind: .named,
+                name: name,
+                wrappedType: nil
+            ))
+        }
+        if current.kind == .bang {
+            _ = advance()
+            let nonNullID = UInt32(document.types.count)
+            document.types.append(FastTypeReference(
+                kind: .nonNull,
+                name: nil,
+                wrappedType: typeID
+            ))
+            return nonNullID
+        }
+        return typeID
     }
 
     mutating func parseSelectionSet() throws -> UInt32 {
@@ -142,12 +230,13 @@ private struct Parser {
     mutating func parseSelection() throws -> UInt32 {
         if current.kind == .spread {
             _ = advance()
+            var typeCondition: FastSourceRange?
             if current.kind == .name, matches(current, "on") {
                 _ = advance()
-                let typeCondition = try expectName().range
-                if current.kind == .at {
-                    throw parseError(.unsupported("inline-fragment directives"))
-                }
+                typeCondition = try expectName().range
+            }
+            if typeCondition != nil || current.kind == .at || current.kind == .leftBrace {
+                let directives = try parseDirectives()
                 let placeholder = appendSelectionPlaceholder()
                 let childSet = try parseSelectionSet()
                 document.selections[Int(placeholder)] = FastSelection(
@@ -155,6 +244,7 @@ private struct Parser {
                     name: nil,
                     alias: nil,
                     arguments: .empty,
+                    directives: directives,
                     selectionSet: childSet,
                     typeCondition: typeCondition,
                     nextSibling: nil
@@ -163,14 +253,13 @@ private struct Parser {
             }
 
             let name = try expectName().range
-            if current.kind == .at {
-                throw parseError(.unsupported("fragment-spread directives"))
-            }
+            let directives = try parseDirectives()
             let selection = FastSelection(
                 kind: .fragmentSpread,
                 name: name,
                 alias: nil,
                 arguments: .empty,
+                directives: directives,
                 selectionSet: nil,
                 typeCondition: nil,
                 nextSibling: nil
@@ -188,9 +277,7 @@ private struct Parser {
         }
 
         let arguments = try parseArguments()
-        if current.kind == .at {
-            throw parseError(.unsupported("field directives"))
-        }
+        let directives = try parseDirectives()
         let placeholder = appendSelectionPlaceholder()
         let childSet = current.kind == .leftBrace ? try parseSelectionSet() : nil
         document.selections[Int(placeholder)] = FastSelection(
@@ -198,6 +285,7 @@ private struct Parser {
             name: name,
             alias: alias,
             arguments: arguments,
+            directives: directives,
             selectionSet: childSet,
             typeCondition: nil,
             nextSibling: nil
@@ -225,6 +313,21 @@ private struct Parser {
         )
     }
 
+    mutating func parseDirectives() throws -> FastArenaRange {
+        guard current.kind == .at else { return .empty }
+        let start = UInt32(document.directives.count)
+        while current.kind == .at {
+            _ = advance()
+            let name = try expectName().range
+            let arguments = try parseArguments()
+            document.directives.append(FastDirective(name: name, arguments: arguments))
+        }
+        return FastArenaRange(
+            start: start,
+            count: UInt32(document.directives.count) - start
+        )
+    }
+
     mutating func parseValue() throws -> UInt32 {
         let token = current
         let kind: FastValue.Kind
@@ -233,7 +336,13 @@ private struct Parser {
             _ = advance()
             let name = try expectName()
             let range = FastSourceRange(start: token.range.start, end: name.range.end)
-            document.values.append(FastValue(kind: .variable, source: range, children: .empty))
+            document.values.append(FastValue(
+                kind: .variable,
+                source: range,
+                firstChild: nil,
+                childCount: 0,
+                nextSibling: nil
+            ))
             return UInt32(document.values.count - 1)
         case .integer: kind = .integer
         case .float: kind = .float
@@ -246,14 +355,86 @@ private struct Parser {
             } else {
                 kind = .enum
             }
-        case .leftBracket, .leftBrace:
-            throw parseError(.unsupported("list and object values"))
+        case .leftBracket:
+            return try parseListValue()
+        case .leftBrace:
+            return try parseObjectValue()
         default:
             throw parseError(.expectedValue)
         }
         _ = advance()
-        document.values.append(FastValue(kind: kind, source: token.range, children: .empty))
+        document.values.append(FastValue(
+            kind: kind,
+            source: token.range,
+            firstChild: nil,
+            childCount: 0,
+            nextSibling: nil
+        ))
         return UInt32(document.values.count - 1)
+    }
+
+    mutating func parseListValue() throws -> UInt32 {
+        let startToken = advance()
+        let listID = appendValuePlaceholder(kind: .list, start: startToken.range.start)
+        var firstChild: UInt32?
+        var previous: UInt32?
+        var count: UInt32 = 0
+        while current.kind != .rightBracket {
+            if current.kind == .eof { throw parseError(.expected(.rightBracket)) }
+            let child = try parseValue()
+            if let previous {
+                document.values[Int(previous)].nextSibling = child
+            } else {
+                firstChild = child
+            }
+            previous = child
+            count += 1
+        }
+        let endToken = advance()
+        document.values[Int(listID)] = FastValue(
+            kind: .list,
+            source: FastSourceRange(start: startToken.range.start, end: endToken.range.end),
+            firstChild: firstChild,
+            childCount: count,
+            nextSibling: nil
+        )
+        return listID
+    }
+
+    mutating func parseObjectValue() throws -> UInt32 {
+        let startToken = advance()
+        let objectID = appendValuePlaceholder(kind: .object, start: startToken.range.start)
+        var firstField: UInt32?
+        var previous: UInt32?
+        var count: UInt32 = 0
+        while current.kind != .rightBrace {
+            if current.kind == .eof { throw parseError(.expected(.rightBrace)) }
+            let name = try expectName().range
+            _ = try expect(.colon)
+            let value = try parseValue()
+            let fieldID = UInt32(document.objectFields.count)
+            document.objectFields.append(FastObjectField(
+                name: name,
+                value: value,
+                nextSibling: nil
+            ))
+            if let previous {
+                document.objectFields[Int(previous)].nextSibling = fieldID
+            } else {
+                firstField = fieldID
+            }
+            previous = fieldID
+            count += 1
+        }
+        let endToken = advance()
+        document.values[Int(objectID)] = FastValue(
+            kind: .object,
+            source: FastSourceRange(start: startToken.range.start, end: endToken.range.end),
+            firstChild: firstField,
+            childCount: count,
+            nextSibling: nil
+        )
+        return objectID
     }
 
     mutating func appendSelectionPlaceholder() -> UInt32 {
@@ -263,8 +444,24 @@ private struct Parser {
             name: nil,
             alias: nil,
             arguments: .empty,
+            directives: .empty,
             selectionSet: nil,
             typeCondition: nil,
+            nextSibling: nil
+        ))
+        return id
+    }
+
+    mutating func appendValuePlaceholder(
+        kind: FastValue.Kind,
+        start: UInt32
+    ) -> UInt32 {
+        let id = UInt32(document.values.count)
+        document.values.append(FastValue(
+            kind: kind,
+            source: FastSourceRange(start: start, end: start),
+            firstChild: nil,
+            childCount: 0,
             nextSibling: nil
         ))
         return id

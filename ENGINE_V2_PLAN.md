@@ -34,7 +34,7 @@ Last updated: 2026-07-21
 
 ### Current milestone
 
-Phase 0 and the initial Phase 1 scaffolding:
+Phase 0 and broader Phase 1 executable-document coverage:
 
 - [x] Preserve the Engine V1 benchmark baseline and metadata.
 - [x] Create the `GraphQLFast` target.
@@ -44,6 +44,10 @@ Phase 0 and the initial Phase 1 scaffolding:
 - [x] Differential-test lexer behavior against Engine V1.
 - [x] Parse all six benchmark documents with structural differential coverage.
 - [ ] Expand differential parsing across the existing executable-document corpus.
+- [x] Parse variable definitions and type references.
+- [x] Parse directives at executable-document locations.
+- [x] Parse list and object input values.
+- [x] Parse named fragment definitions.
 - [x] Add lexer and parser microbenchmark measurements.
 
 Status notes and benchmark evidence must be added to this document as work lands. A checked item
@@ -169,6 +173,23 @@ These are internal parser-boundary measurements, not substitutes for the end-to-
 Engine V2 does not yet adapt its compact parse errors into the public `GraphQLError` representation.
 - Full regression verification after this milestone: 901 tests in 68 suites passed, including the
   original 891 GraphQL tests and 10 new Engine V2 test invocations.
+
+### 2026-07-21: Broader executable grammar
+
+- Added compact arenas for fragments, variable definitions, type references, directives, complex
+  values, and object fields.
+- Added variable defaults, nested list/non-null type references, directives on operations, fields,
+  inline fragments, fragment spreads, fragments, and variable definitions.
+- Added nested list and object values using linked arena entries rather than recursive object
+  allocation.
+- Added named fragment definitions and inline fragments without a type condition.
+- Added a 15-document accepted/rejected differential corpus covering these features.
+- The microbenchmark caught a 64% successful-parse regression caused by eagerly reserving five
+  optional arenas. Making those arenas allocate only on first use reduced successful parsing from
+  649.52 ns to 439.63 ns and malformed parsing from 466.18 ns to 318.29 ns.
+- Post-expansion release measurements: 147.26 ns successful lex, 439.63 ns successful parse, and
+  318.29 ns malformed parse.
+- Full regression verification: 903 tests in 68 suites passed.
 
 ## Phase 0: Baseline and Contracts
 

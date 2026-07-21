@@ -34,7 +34,52 @@ import Testing
         #expect(document.selections.count == 5)
         #expect(document.selectionSets[Int(document.operations[0].selectionSet)].selectionCount == 2)
     }
+
+    @Test(arguments: executableFeatureCorpus)
+    func executableFeatureAcceptanceMatchesReference(source: String) {
+        let referenceAccepted = (try? parse(source: source, noLocation: true)) != nil
+        let fastAccepted = (try? FastParser.parse(source)) != nil
+        #expect(fastAccepted == referenceAccepted)
+    }
+
+    @Test func storesVariablesDirectivesFragmentsAndComplexValues() throws {
+        let source = """
+        query Search($ids: [ID!]! = ["1", "2"] @configured) @operation {
+          people(filter: { ids: $ids, active: true }) @field { id }
+          ...PersonFields @spread
+        }
+        fragment PersonFields on Person @fragment { name }
+        """
+        let document = try FastParser.parse(source)
+
+        #expect(document.operations.count == 1)
+        #expect(document.fragments.count == 1)
+        #expect(document.variableDefinitions.count == 1)
+        #expect(document.types.count == 4)
+        #expect(document.directives.count == 5)
+        #expect(document.objectFields.count == 2)
+        #expect(document.values.contains { $0.kind == .list })
+        #expect(document.values.contains { $0.kind == .object })
+    }
 }
+
+private let executableFeatureCorpus = [
+    "query Q($id: ID!) { person(id: $id) { id } }",
+    "query Q($ids: [ID!]! = [\"1\", \"2\"]) { people(ids: $ids) { id } }",
+    "query Q @skip(if: false) { person(id: \"1\") @include(if: true) { id } }",
+    "query Q { search(filter: { text: \"luke\", flags: [A, B], nested: { ok: true } }) }",
+    "query Q { person(id: \"1\") { ... on Person @include(if: true) { name } } }",
+    "query Q { person(id: \"1\") { ... @skip(if: false) { name } } }",
+    "query Q { person(id: \"1\") { ...Fields @include(if: true) } } fragment Fields on Person { name }",
+    "query A { a } mutation B { b } subscription C { c }",
+    "{ anonymous }",
+    "fragment Fields on Person { id name }",
+    "",
+    "query Q {",
+    "query Q($id ID) { field }",
+    "fragment on Person { id }",
+    "query Q { field(arg: [1, 2) }",
+]
 
 private let benchmarkSuccessQueries = [
     """
