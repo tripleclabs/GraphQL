@@ -22,7 +22,9 @@ enum EngineV2Execute {
     /// Completion shape for one planned field, mirroring the field's wrapped output type. Abstract
     /// and input types are excluded and force a fallback during planning.
     indirect enum PlanCompletion {
-        case leaf(GraphQLLeafType)
+        /// `stringCoercible` marks `String`/`ID`, whose serialization of a Swift `String` source is
+        /// exactly `.string(value)`, enabling a fast path that skips existential scalar dispatch.
+        case leaf(GraphQLLeafType, stringCoercible: Bool)
         case object(GraphQLObjectType, children: [PlanField])
         case list(PlanCompletion)
         case nonNull(PlanCompletion)
@@ -226,7 +228,9 @@ enum EngineV2Execute {
                 let namedType = compiled.namedTypes[Int(reference.namedType.rawValue)]
                 if let leaf = namedType as? GraphQLLeafType {
                     guard childSelectionSet == nil else { return nil }
-                    return .leaf(leaf)
+                    let stringCoercible = leaf as AnyObject === GraphQLString
+                        || leaf as AnyObject === GraphQLID
+                    return .leaf(leaf, stringCoercible: stringCoercible)
                 }
                 if let object = namedType as? GraphQLObjectType {
                     // Runtime type disambiguation is out of slice scope.
@@ -294,8 +298,25 @@ enum EngineV2Execute {
     ) throws -> OrderedDictionary<String, Map> {
         var results = OrderedDictionary<String, Map>()
         results.reserveCapacity(fields.count)
+        // The source container's storage kind is identified at most once per object, then reused
+        // for every default-keyed field, instead of re-running the existential-cast cascade per
+        // field. Resolution is deferred so objects whose fields are all source-only pay nothing.
+        var accessor: SourceAccessor?
         for field in fields {
-            let resolved = try resolve(field: field, source: source)
+            let resolved: (any Sendable)?
+            switch field.resolver {
+            case let .sourceOnly(thunk):
+                resolved = try thunk(source)
+            case .defaultKeyed:
+                let container: SourceAccessor
+                if let accessor {
+                    container = accessor
+                } else {
+                    container = SourceAccessor(source: source)
+                    accessor = container
+                }
+                resolved = container.value(forKey: field.fieldName)
+            }
             let completed = try completeCatchingError(
                 completion: field.completion,
                 value: resolved,
@@ -308,29 +329,38 @@ enum EngineV2Execute {
         return results
     }
 
-    private static func resolve(field: PlanField, source: any Sendable) throws -> (any Sendable)? {
-        switch field.resolver {
-        case let .sourceOnly(thunk):
-            return try thunk(source)
-        case .defaultKeyed:
-            return extractKey(from: source, name: field.fieldName)
-        }
-    }
+    /// A source object's default-resolution storage, identified once. Precedence mirrors Engine
+    /// V1's `extractKey`: `KeySubscriptable`, then `[String: any Sendable]`, then an ordered map,
+    /// then reflection.
+    private enum SourceAccessor {
+        case keySubscriptable(KeySubscriptable)
+        case stringDictionary([String: any Sendable])
+        case orderedDictionary(OrderedDictionary<String, any Sendable>)
+        case reflected(any Sendable)
+        case empty
 
-    /// Mirrors Engine V1's non-introspection default resolution: read the field's key directly
-    /// from the source container.
-    private static func extractKey(from source: any Sendable, name: String) -> (any Sendable)? {
-        guard let source = unwrap(source) else { return nil }
-        if let subscriptable = source as? KeySubscriptable {
-            return subscriptable[name]
+        init(source: any Sendable) {
+            guard let source = unwrap(source) else { self = .empty; return }
+            if let subscriptable = source as? KeySubscriptable {
+                self = .keySubscriptable(subscriptable)
+            } else if let dictionary = source as? [String: any Sendable] {
+                self = .stringDictionary(dictionary)
+            } else if let dictionary = source as? OrderedDictionary<String, any Sendable> {
+                self = .orderedDictionary(dictionary)
+            } else {
+                self = .reflected(source)
+            }
         }
-        if let subscriptable = source as? [String: any Sendable] {
-            return subscriptable[name]
+
+        func value(forKey key: String) -> (any Sendable)? {
+            switch self {
+            case let .keySubscriptable(subscriptable): return subscriptable[key]
+            case let .stringDictionary(dictionary): return dictionary[key]
+            case let .orderedDictionary(dictionary): return dictionary[key]
+            case let .reflected(source): return Mirror(reflecting: source).getValue(named: key)
+            case .empty: return nil
+            }
         }
-        if let subscriptable = source as? OrderedDictionary<String, any Sendable> {
-            return subscriptable[name]
-        }
-        return Mirror(reflecting: source).getValue(named: name)
     }
 
     /// Applies Engine V1's located-error boundary: an error (or null) in a non-null position
@@ -385,8 +415,11 @@ enum EngineV2Execute {
                 throw nonNullError(parentTypeName: parentTypeName, fieldName: fieldName)
             }
             return completed
-        case let .leaf(leaf):
+        case let .leaf(leaf, stringCoercible):
             guard let value, let unwrapped = unwrap(value) else { return nil }
+            if stringCoercible, let string = unwrapped as? String {
+                return .string(string)
+            }
             return try leaf.serialize(value: unwrapped)
         case let .object(_, children):
             guard let value, let unwrapped = unwrap(value) else { return nil }

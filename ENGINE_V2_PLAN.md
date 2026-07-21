@@ -94,20 +94,25 @@ means its implementation and proportionate verification are complete, not merely
 - Engine V2 is still isolated from the public execution path; Engine V1 remains authoritative. The
   `single_item` slice is reachable only through the `@_spi(EngineV2Benchmark)`
   `engineV2ExecuteSingleItem` entry, used by benchmarks and differential tests.
-- Phase 1 is complete. Phase 2 foundations are in place. The first `single_item` vertical slice
-  (fused planner + synchronous executor) is implemented, differentially verified, and benchmarked
-  end to end; see the newest progress entry.
-- The end-to-end viability gate is met relative to Engine V1 on the current host. The next task is
-  to close the honesty gap: add Engine V2 document/schema validation (or an equivalence proof) so the
-  comparison honors the full benchmark contract, then add the preallocated result arena and list
-  completion.
+- Phase 1 is complete. Phase 2 foundations are in place. The `single_item` and `list_items` vertical
+  slices (fused planner + synchronous executor with recursive list/non-null completion) are
+  implemented, differentially verified, and benchmarked end to end; see the newest progress entry.
+- The end-to-end viability gate is met relative to Engine V1 on the current host. The result arena
+  (Phase 5) was measured before implementation and deferred: result-node construction is only ~11%
+  of `list_items` execution cost, so it cannot pay off while the public result is `Map`. Two
+  hot-path optimizations (once-per-object source-container reuse; plan-time `String`/`ID` scalar
+  fast path) instead cut `single_item` execute-only −25% and `list_items` execute-only −31%.
+- The next task is to close the honesty gap: add Engine V2 document/schema validation (or an
+  equivalence proof) so the comparison honors the full benchmark contract. Remaining execution
+  levers, ahead of any arena, are the `as? [(any Sendable)?]` array bridging cast and ARC on boxed
+  `any Sendable` values.
 - Do not resume broad Phase 2 completeness work merely to increase feature count. Tighten the
-  `single_item` contract (validation, arena) before widening to more cases.
+  `single_item`/`list_items` contract (validation) before widening to more cases.
 - Focused verification commands: `swift test --filter EngineV2ExecuteTests` and
   `swift test --filter FastCompiledSchemaTests`.
 - Full verification command: `swift test`.
 - Release microbenchmark command: `swift run -c release graphql-fast-benchmarks`.
-- Last verified state: 922 tests in 71 suites pass; no known correctness regression. Note the Linux
+- Last verified state: 925 tests in 71 suites pass; no known correctness regression. Note the Linux
   `CoreFoundation` import fix in `MapSerialization.swift` required to build on this host.
 - Read this checkpoint, the current milestone checklist, and the newest dated progress entry before
   editing. Inspect `git status` and recent history so user work is never overwritten.
@@ -190,6 +195,62 @@ Baseline metadata:
 - Pipeline: parse, validate, execute, and materialize the ordinary public result.
 
 ## Progress Log
+
+### 2026-07-21: List completion, and the result-arena hypothesis retired by measurement
+
+All numbers below are self-relative on the Linux x86_64 dev host (materially slower in absolute
+terms than the M5 Pro baseline; V1/V2 ratios remain the signal). Configuration: 1,000 warmups,
+10,000 iterations per sample, 15 samples, SwiftPM release.
+
+**List completion.** Generalized the slice's completion model from a flat leaf/object shape to a
+recursive one (`leaf` / `object` / `list` / `nonNull`) that mirrors the field's wrapped output
+type, so list and nested-wrapper positions now execute on the fast path with per-item located-error
+semantics matching Engine V1 — including root propagation, where a non-null error reaching the root
+yields absent `data` and only the propagated error (accumulated sibling errors are discarded, as in
+Engine V1). Added `list_items` differential coverage (populated, empty, and non-null-element
+propagation) and split the benchmark into reusable plan and execute phases so parse+plan and
+execute+materialize are timed independently.
+
+**The result arena was measured before being built, and shelved.** The plan assumed a preallocated
+result arena would materially help `list_items`. Direct measurement contradicts that:
+
+| Boundary | Median |
+| --- | ---: |
+| Engine V2 `single_item` execute + materialize | 5,836 ns |
+| Engine V2 `list_items` (20 elements) execute + materialize | 124,375 ns |
+| Pure public-`Map` shape materialization floor for `list_items` (no resolvers/casts/serialize) | 13,697 ns |
+
+Building the result nodes is only ~11% of `list_items` execution cost and ~0% of the `single_item`
+win. Because the public contract fixes the result as `Map` (an `OrderedDictionary`-backed enum), any
+arena must still emit exactly that shape at the boundary, so it cannot recover more than that ~11%
+floor. The dominant ~110 us is per-field work in the resolve/complete loop: repeated existential
+casts, per-scalar `serialize` dispatch, and ARC on `any Sendable`. Per the working principle
+"optimize measured costs rather than presumed costs," the arena is deferred and the hot path was
+attacked instead.
+
+**Hot-path optimizations (both preserve exact Engine V1 semantics).**
+
+1. Identify a source object's default-resolution container kind once per object (`KeySubscriptable`
+   → `[String: any Sendable]` → ordered map → reflection, the same precedence as Engine V1's
+   `extractKey`) and reuse it for every default-keyed field, instead of re-running the cast cascade
+   per field. Resolution is deferred so all-source-only objects (e.g. the root) pay nothing.
+2. Classify `String`/`ID` leaves at plan time; a Swift `String` source serializes to exactly
+   `.string(value)` for both, so the executor returns that directly and falls back to
+   `leaf.serialize` for any other value or scalar. This skips existential scalar dispatch on the
+   most common leaf.
+
+| Boundary | Before | After container reuse | After scalar fast path |
+| --- | ---: | ---: | ---: |
+| `single_item` execute + materialize | 5,836 ns | 4,727 ns | 4,396 ns |
+| `list_items` execute + materialize | 124,375 ns | 92,114 ns | 86,353 ns |
+| `list_items` end-to-end | 132,025 ns | 104,189 ns | 96,417 ns |
+
+Net: `single_item` execute-only −25%, `list_items` execute-only −31%, with the result-shape floor
+unchanged at ~12.6 us. Remaining `list_items` cost above the floor (~74 us) is the array bridging
+cast (`as? [(any Sendable)?]`, shared with Engine V1) and ARC on boxed `any Sendable` values — the
+next levers, ahead of any arena.
+
+- Full regression verification: 925 tests in 71 suites passed (922 prior + 3 new list tests).
 
 ### 2026-07-21: Engine V2 `single_item` vertical slice and first end-to-end number
 
