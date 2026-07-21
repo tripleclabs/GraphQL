@@ -61,6 +61,7 @@ means its implementation and proportionate verification are complete, not merely
 
 - Repository: `/Users/johnmaxwell/src/graphql`.
 - Branch: `codex/engine-v2`.
+- Latest verified implementation commit: `c03e4e2` (`Compile direct GraphQLFast resolver thunks`).
 - Engine V2 is still isolated from the public execution path; Engine V1 remains authoritative.
 - Phase 1 is complete. Phase 2 is in progress with numeric schema tables, abstract membership,
   enum/directive structure, and aligned resolver/subscription thunks complete.
