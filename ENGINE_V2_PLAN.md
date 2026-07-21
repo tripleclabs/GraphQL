@@ -98,10 +98,12 @@ means its implementation and proportionate verification are complete, not merely
   slices (fused planner + synchronous executor with recursive list/non-null completion) are
   implemented, differentially verified, and benchmarked end to end; see the newest progress entry.
 - The end-to-end viability gate is met relative to Engine V1 on the current host. The result arena
-  (Phase 5) was measured before implementation and deferred: result-node construction is only ~11%
-  of `list_items` execution cost, so it cannot pay off while the public result is `Map`. Two
-  hot-path optimizations (once-per-object source-container reuse; plan-time `String`/`ID` scalar
-  fast path) instead cut `single_item` execute-only −25% and `list_items` execute-only −31%.
+  (Phase 5) was implemented in full, verified against all differential cases, measured as an 11–24%
+  regression under the `Map` contract, and reverted (see the newest progress entry); the direct-`Map`
+  executor is retained. Do not re-attempt the arena without first changing the public result
+  contract. Two hot-path optimizations (once-per-object source-container reuse; plan-time
+  `String`/`ID` scalar fast path) instead cut `single_item` execute-only −25% and `list_items`
+  execute-only −31%.
 - The next task is to close the honesty gap: add Engine V2 document/schema validation (or an
   equivalence proof) so the comparison honors the full benchmark contract. Remaining execution
   levers, ahead of any arena, are the `as? [(any Sendable)?]` array bridging cast and ARC on boxed
@@ -225,8 +227,18 @@ win. Because the public contract fixes the result as `Map` (an `OrderedDictionar
 arena must still emit exactly that shape at the boundary, so it cannot recover more than that ~11%
 floor. The dominant ~110 us is per-field work in the resolve/complete loop: repeated existential
 casts, per-scalar `serialize` dispatch, and ARC on `any Sendable`. Per the working principle
-"optimize measured costs rather than presumed costs," the arena is deferred and the hot path was
-attacked instead.
+"optimize measured costs rather than presumed costs," the hot path was attacked instead.
+
+**The arena was then implemented in full to settle the question empirically, and reverted.** A flat
+`ResultArena` (contiguous node/object-field/list-item arrays with reused scratch stacks for
+contiguous child layout, subtree rollback on caught errors, and a single `materialize` pass to the
+public `Map`) was built and passed all 12 differential cases including list and null-propagation
+parity. Measured against the retained direct-`Map` path it was a regression — `single_item`
+execute-only ~4.4 us → ~5.45 us (+24%), `list_items` execute-only ~86.4 us → ~95.6 us (+11%) —
+because `materialize` rebuilds exactly the `OrderedDictionary` tree the direct path already builds,
+making the arena a second pass over unavoidable work. It was reverted; the direct-`Map` executor is
+retained. This is recorded so the arena is not re-attempted without first changing the public result
+contract (e.g. a non-`Map` internal consumer or streamed output), which is what would give it a win.
 
 **Hot-path optimizations (both preserve exact Engine V1 semantics).**
 
