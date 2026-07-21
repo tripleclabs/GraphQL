@@ -37,6 +37,63 @@ public func engineV1PossibleTypeChecksum(
     return schema.isSubType(abstractType: abstract, maybeSubType: possible) ? 1 : 0
 }
 
+@_spi(EngineV2Benchmark)
+public func engineV1BenchmarkFieldDefinition(
+    _ schema: GraphQLSchema,
+    parentTypeName: String,
+    fieldName: String
+) throws -> GraphQLFieldDefinition {
+    guard let parent = schema.getType(name: parentTypeName) as? GraphQLObjectType,
+          let field = try parent.getFields()[fieldName]
+    else {
+        throw GraphQLError(message: "Benchmark field \(parentTypeName).\(fieldName) was not found.")
+    }
+    return field
+}
+
+@_spi(EngineV2Benchmark)
+public func engineV2BenchmarkSourceResolver(
+    _ schema: GraphQLSchema,
+    parentTypeName: String,
+    fieldName: String
+) throws -> GraphQLFieldFastResolve {
+    let compiled = try schema.engineV2CompiledSchema()
+    guard let parent = compiled.metadata.typeID(named: parentTypeName),
+          let field = compiled.metadata.fieldID(on: parent, named: fieldName),
+          case let .sourceOnly(resolve) = compiled.fieldResolvers[Int(field.rawValue)]
+    else {
+        throw GraphQLError(
+            message: "Benchmark field \(parentTypeName).\(fieldName) has no source-only resolver."
+        )
+    }
+    return resolve
+}
+
+@inline(never)
+@_spi(EngineV2Benchmark)
+public func engineV1SourceResolverChecksum(
+    _ field: GraphQLFieldDefinition,
+    source: any Sendable
+) throws -> Int {
+    guard let resolve = field.fastResolve else { return 0 }
+    return try resolverChecksum(resolve(source))
+}
+
+@inline(never)
+@_spi(EngineV2Benchmark)
+public func engineV2SourceResolverChecksum(
+    _ resolve: GraphQLFieldFastResolve,
+    source: any Sendable
+) throws -> Int {
+    try resolverChecksum(resolve(source))
+}
+
+@inline(never)
+private func resolverChecksum(_ value: (any Sendable)?) -> Int {
+    if let integer = value as? Int { return integer }
+    return withExtendedLifetime(value) { value == nil ? 0 : 1 }
+}
+
 /// Adapts compact Engine V2 parser failures into the existing eager public error representation.
 /// This is SPI while the new engine remains disconnected from the public request path.
 @_spi(EngineV2Benchmark)

@@ -39,8 +39,20 @@ private let cachedBenchmarkSchema = try! engineV2CachedSchema(benchmarkSchema)
 private let benchmarkQueryTypeID = cachedBenchmarkSchema.typeID(named: "Query")!
 private let benchmarkSearchResultTypeID = cachedBenchmarkSchema.typeID(named: "SearchResult")!
 private let benchmarkPersonTypeID = cachedBenchmarkSchema.typeID(named: "Person")!
+private let benchmarkV1ResolverField = try! engineV1BenchmarkFieldDefinition(
+    benchmarkSchema,
+    parentTypeName: "Query",
+    fieldName: "resolverProbe"
+)
+private let benchmarkV2Resolver = try! engineV2BenchmarkSourceResolver(
+    benchmarkSchema,
+    parentTypeName: "Query",
+    fieldName: "resolverProbe"
+)
 nonisolated(unsafe) private var v1PossibleTypeIteration = 0
 nonisolated(unsafe) private var v2PossibleTypeIteration = 0
+nonisolated(unsafe) private var v1ResolverIteration = 0
+nonisolated(unsafe) private var v2ResolverIteration = 0
 
 private let environment = ProcessInfo.processInfo.environment
 private let warmup = Int(environment["WARMUP"] ?? "1000") ?? 1000
@@ -150,6 +162,24 @@ private func benchmarkV1PossibleType(_ schema: GraphQLSchema) -> Int {
     )
 }
 
+@inline(never)
+private func benchmarkV1ResolverDispatch() throws -> Int {
+    v1ResolverIteration &+= 1
+    return try engineV1SourceResolverChecksum(
+        benchmarkV1ResolverField,
+        source: v1ResolverIteration & 1
+    )
+}
+
+@inline(never)
+private func benchmarkV2ResolverDispatch() throws -> Int {
+    v2ResolverIteration &+= 1
+    return try engineV2SourceResolverChecksum(
+        benchmarkV2Resolver,
+        source: v2ResolverIteration & 1
+    )
+}
+
 private func firstArgumentValue(in document: FastDocument) -> UInt32 {
     document.arguments[0].value
 }
@@ -246,6 +276,12 @@ private let measurements = [
             nonmatchingType: benchmarkQueryTypeID
         )
     },
+    measure("v1_source_resolver_dispatch") {
+        try benchmarkV1ResolverDispatch()
+    },
+    measure("v2_source_resolver_dispatch") {
+        try benchmarkV2ResolverDispatch()
+    },
     measure("v1_parse_malformed") {
         do {
             return try parse(source: malformedQuery, noLocation: true).definitions.count
@@ -295,6 +331,10 @@ private func makeBenchmarkSchema() throws -> GraphQLSchema {
                 args: ["id": GraphQLArgument(type: GraphQLNonNull(GraphQLID))]
             ),
             "people": GraphQLField(type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person)))),
+            "resolverProbe": GraphQLField(
+                type: GraphQLInt,
+                fastResolve: { source in (source as? Int ?? 0) &+ 1 }
+            ),
         ]
     )
     let searchResult = try GraphQLUnionType(name: "SearchResult", types: [person])

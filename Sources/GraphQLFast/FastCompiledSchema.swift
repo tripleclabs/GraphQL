@@ -182,12 +182,22 @@ public struct FastSchemaTypeReference: Sendable {
 }
 
 @frozen
+public enum FastSchemaFieldResolverKind: UInt8, Sendable {
+    case sourceOnly
+    case synchronous
+    case asynchronous
+}
+
+@frozen
 public struct FastSchemaField: Sendable {
     public let parentType: FastSchemaTypeID
     public let name: FastSchemaNameID
     public let type: FastSchemaTypeReferenceID
     public let arguments: FastArenaRange
     public let isDeprecated: Bool
+    public let resolverKind: FastSchemaFieldResolverKind
+    public let resolverIsComplete: Bool
+    public let hasCustomSubscribe: Bool
 
     @inlinable
     public init(
@@ -195,13 +205,19 @@ public struct FastSchemaField: Sendable {
         name: FastSchemaNameID,
         type: FastSchemaTypeReferenceID,
         arguments: FastArenaRange,
-        isDeprecated: Bool
+        isDeprecated: Bool,
+        resolverKind: FastSchemaFieldResolverKind,
+        resolverIsComplete: Bool,
+        hasCustomSubscribe: Bool
     ) {
         self.parentType = parentType
         self.name = name
         self.type = type
         self.arguments = arguments
         self.isDeprecated = isDeprecated
+        self.resolverKind = resolverKind
+        self.resolverIsComplete = resolverIsComplete
+        self.hasCustomSubscribe = hasCustomSubscribe
     }
 }
 

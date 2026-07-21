@@ -4,9 +4,17 @@ struct EngineV2CompiledSchema: Sendable {
     let metadata: FastCompiledSchema
     let namedTypes: ContiguousArray<GraphQLNamedType>
     let fieldDefinitions: ContiguousArray<GraphQLFieldDefinition>
+    let fieldResolvers: ContiguousArray<EngineV2FieldResolver>
+    let subscriptionResolvers: ContiguousArray<GraphQLFieldResolve>
     let inputDefaults: ContiguousArray<Map?>
     let enumValueDefinitions: ContiguousArray<GraphQLEnumValueDefinition>
     let directiveDefinitions: ContiguousArray<GraphQLDirective>
+}
+
+enum EngineV2FieldResolver: Sendable {
+    case sourceOnly(GraphQLFieldFastResolve)
+    case synchronous(GraphQLFieldResolveInput)
+    case asynchronous(GraphQLFieldResolve)
 }
 
 extension GraphQLSchema {
@@ -55,6 +63,8 @@ private struct Builder {
     var directives: ContiguousArray<FastSchemaDirective> = []
     var namedTypes: ContiguousArray<GraphQLNamedType> = []
     var fieldDefinitions: ContiguousArray<GraphQLFieldDefinition> = []
+    var fieldResolvers: ContiguousArray<EngineV2FieldResolver> = []
+    var subscriptionResolvers: ContiguousArray<GraphQLFieldResolve> = []
     var inputDefaults: ContiguousArray<Map?> = []
     var enumValueDefinitions: ContiguousArray<GraphQLEnumValueDefinition> = []
 
@@ -120,6 +130,8 @@ private struct Builder {
             metadata: metadata,
             namedTypes: namedTypes,
             fieldDefinitions: fieldDefinitions,
+            fieldResolvers: fieldResolvers,
+            subscriptionResolvers: subscriptionResolvers,
             inputDefaults: inputDefaults,
             enumValueDefinitions: enumValueDefinitions,
             directiveDefinitions: ContiguousArray(schema.directives)
@@ -251,6 +263,7 @@ private struct Builder {
                     isDeprecated: argument.deprecationReason != nil
                 )
             }
+            let resolver = compileResolver(definition)
             fields.append(FastSchemaField(
                 parentType: parent,
                 name: try intern(definition.name),
@@ -259,11 +272,38 @@ private struct Builder {
                     start: argumentStart,
                     count: try checkedID(definition.args.count)
                 ),
-                isDeprecated: definition.isDeprecated
+                isDeprecated: definition.isDeprecated,
+                resolverKind: resolver.kind,
+                resolverIsComplete: definition.fastResolveIsComplete && definition.fastResolve != nil,
+                hasCustomSubscribe: definition.subscribe != nil
             ))
             fieldDefinitions.append(definition)
+            fieldResolvers.append(resolver.thunk)
+            subscriptionResolvers.append(compileSubscriptionResolver(definition))
         }
         return FastArenaRange(start: start, count: try checkedID(definitions.count))
+    }
+
+    func compileSubscriptionResolver(_ definition: GraphQLFieldDefinition) -> GraphQLFieldResolve {
+        if let subscribe = definition.subscribe { return subscribe }
+        return { source, args, context, info in
+            try defaultResolve(source: source, args: args, context: context, info: info)
+        }
+    }
+
+    func compileResolver(
+        _ definition: GraphQLFieldDefinition
+    ) -> (kind: FastSchemaFieldResolverKind, thunk: EngineV2FieldResolver) {
+        if let fastResolve = definition.fastResolve {
+            return (.sourceOnly, .sourceOnly(fastResolve))
+        }
+        if let synchronousResolve = definition.synchronousResolve {
+            return (.synchronous, .synchronous(synchronousResolve))
+        }
+        if let resolve = definition.resolve {
+            return (.asynchronous, .asynchronous(resolve))
+        }
+        return (.synchronous, .synchronous(defaultResolve))
     }
 
     mutating func compileInputFields(of namedType: GraphQLNamedType) throws -> FastArenaRange {

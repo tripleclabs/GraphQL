@@ -11,6 +11,8 @@ import Testing
         #expect(metadata.types.count == fixture.schema.typeMap.count)
         #expect(compiled.namedTypes.count == metadata.types.count)
         #expect(compiled.fieldDefinitions.count == metadata.fields.count)
+        #expect(compiled.fieldResolvers.count == metadata.fields.count)
+        #expect(compiled.subscriptionResolvers.count == metadata.fields.count)
         #expect(compiled.inputDefaults.count == metadata.inputValues.count)
         #expect(compiled.enumValueDefinitions.count == metadata.enumValues.count)
         #expect(compiled.directiveDefinitions.count == metadata.directives.count)
@@ -49,6 +51,38 @@ import Testing
         #expect(metadata.name(personField.name) == "person")
         #expect(personField.arguments.count == 1)
         #expect(metadata.typeReferences[Int(personField.type.rawValue)].namedType == personID)
+        #expect(personField.resolverKind == .synchronous)
+        #expect(!personField.resolverIsComplete)
+        #expect(!personField.hasCustomSubscribe)
+
+        let fastFieldID = try #require(metadata.fieldID(on: queryID, named: "fast"))
+        let fastField = metadata.fields[Int(fastFieldID.rawValue)]
+        #expect(fastField.resolverKind == .sourceOnly)
+        #expect(fastField.resolverIsComplete)
+        if case .sourceOnly = compiled.fieldResolvers[Int(fastFieldID.rawValue)] {
+            // Expected: retain the narrow source-only calling convention.
+        } else {
+            Issue.record("Expected a source-only resolver thunk")
+        }
+
+        let syncFieldID = try #require(metadata.fieldID(on: queryID, named: "sync"))
+        #expect(metadata.fields[Int(syncFieldID.rawValue)].resolverKind == .synchronous)
+        if case .synchronous = compiled.fieldResolvers[Int(syncFieldID.rawValue)] {
+            // Expected.
+        } else {
+            Issue.record("Expected a synchronous resolver thunk")
+        }
+
+        let asyncFieldID = try #require(metadata.fieldID(on: queryID, named: "async"))
+        #expect(metadata.fields[Int(asyncFieldID.rawValue)].resolverKind == .asynchronous)
+        if case .asynchronous = compiled.fieldResolvers[Int(asyncFieldID.rawValue)] {
+            // Expected.
+        } else {
+            Issue.record("Expected an asynchronous resolver thunk")
+        }
+
+        let eventsFieldID = try #require(metadata.fieldID(on: queryID, named: "events"))
+        #expect(metadata.fields[Int(eventsFieldID.rawValue)].hasCustomSubscribe)
 
         let friendsFieldID = try #require(metadata.fieldID(on: personID, named: "friends"))
         let friendsField = metadata.fields[Int(friendsFieldID.rawValue)]
@@ -146,6 +180,9 @@ private func makeSchemaFixture() throws -> SchemaFixture {
         interfaces: { [node] }
     )
     let searchResult = try GraphQLUnionType(name: "SearchResult", types: [person])
+    let synchronousResolve: GraphQLFieldResolveInput = { _, _, _, _ in Map.string("sync") }
+    let asynchronousResolve: GraphQLFieldResolve = { _, _, _, _ in Map.string("async") }
+    let subscribe: GraphQLFieldResolve = { _, _, _, _ in Map.string("stream") }
     let query = try GraphQLObjectType(
         name: "Query",
         fields: [
@@ -161,6 +198,24 @@ private func makeSchemaFixture() throws -> SchemaFixture {
                         defaultValue: Map.dictionary([:])
                     ),
                 ]
+            ),
+            "fast": GraphQLField(
+                type: GraphQLString,
+                fastResolveIsComplete: true,
+                fastResolve: { _ in Map.string("fast") }
+            ),
+            "sync": GraphQLField(
+                type: GraphQLString,
+                resolve: synchronousResolve
+            ),
+            "async": GraphQLField(
+                type: GraphQLString,
+                resolve: asynchronousResolve
+            ),
+            "events": GraphQLField(
+                type: GraphQLString,
+                resolve: nil,
+                subscribe: subscribe
             ),
         ]
     )

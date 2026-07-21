@@ -46,11 +46,35 @@ Phase 2 compiled schema representation:
 - [x] Compile interface and union membership tables.
 - [x] Compile enum values and directive structure, arguments, locations, and repeatability.
 - [ ] Compile remaining descriptions, deprecation details, and introspection metadata.
-- [ ] Store resolver thunks directly alongside field records.
+- [x] Store resolver thunks directly alongside field records.
+  - [x] Classify default, source-only, synchronous, and asynchronous field resolvers at schema
+    compilation and build an aligned direct-thunk table.
+  - [x] Preserve subscription resolver classification and fallback semantics.
+  - [x] Add correctness coverage and a same-boundary resolver-dispatch microbenchmark harness.
+  - [x] Run focused and full correctness tests, then measure the resolver microbenchmark.
 - [ ] Compile every existing test schema or explicitly classify unsupported behavior.
 
 Status notes and benchmark evidence must be added to this document as work lands. A checked item
 means its implementation and proportionate verification are complete, not merely started.
+
+### Resumption checkpoint
+
+- Repository: `/Users/johnmaxwell/src/graphql`.
+- Branch: `codex/engine-v2`.
+- Engine V2 is still isolated from the public execution path; Engine V1 remains authoritative.
+- Phase 1 is complete. Phase 2 is in progress with numeric schema tables, abstract membership,
+  enum/directive structure, and aligned resolver/subscription thunks complete.
+- The next task is to compile descriptions and full deprecation/introspection metadata, then run
+  the compiler across the existing test-schema corpus and classify every unsupported behavior as
+  an explicit Engine V1 fallback.
+- Do not begin Phase 3 request planning until the remaining Phase 2 checklist items above are
+  complete.
+- Focused verification command: `swift test --filter FastCompiledSchemaTests`.
+- Full verification command: `swift test`.
+- Release microbenchmark command: `swift run -c release graphql-fast-benchmarks`.
+- Last verified state: 913 tests in 70 suites pass; no known correctness regression.
+- Read this checkpoint, the current milestone checklist, and the newest dated progress entry before
+  editing. Inspect `git status` and recent history so user work is never overwritten.
 
 ### Microbenchmark policy
 
@@ -340,6 +364,37 @@ smaller schema fixture.
 The next Phase 2 slice will classify the existing field resolver forms and store direct resolver
 thunks alongside compiled field metadata, followed by compilation across the broader test-schema
 corpus and explicit fallback classification for unsupported behavior.
+
+### 2026-07-21: Phase 2 direct resolver thunks
+
+- Added an aligned resolver table indexed by `FastSchemaFieldID`. Source-only Graphiti resolvers
+  retain their one-argument calling convention; synchronous and asynchronous resolvers remain
+  separate thunk forms rather than being erased into one async ABI.
+- Compiled default field resolution once as a synchronous thunk. Added aligned subscription thunks
+  that preserve `subscribe ?? defaultResolve` semantics and record whether a custom subscriber was
+  supplied.
+- Added compact resolver-kind, completion, and custom-subscription flags to each fast field record,
+  allowing future request plans to select execution behavior without probing optional properties
+  on `GraphQLFieldDefinition`.
+- Added tests covering default, source-only, synchronous, asynchronous, and subscription
+  classification. Focused verification passed 3 tests; full verification passed 913 tests in 70
+  suites.
+
+| Source-only resolver boundary | Engine V1 | Engine V2 | Speedup |
+| --- | ---: | ---: | ---: |
+| Preplanned field dispatch and invocation | 30.89 ns | 28.45 ns | 1.09x |
+
+The benchmark alternates integer source values and consumes the resolved integer. Engine V1 starts
+from its preplanned `GraphQLFieldDefinition`, loads and unwraps `fastResolve`, then invokes it;
+Engine V2 starts from the source-only closure selected by numeric field ID during planning. A
+repeat run was stable (29.74 ns versus 28.30 ns). The modest gain is useful evidence: resolver
+selection is no longer repeated, but closure invocation, `any Sendable` input/output, throwing, and
+result handling dominate this isolated boundary. Matching Rust will require attacking that ABI and
+the later completion path, not claiming that preselection alone solves resolver cost.
+
+On the expanded fixture, the repeat run measured cold schema compilation at 24,767.87 ns and
+cached-view acquisition at 203.16 ns. Both remain one-time/request-setup costs and must not enter
+the per-field execution loop.
 
 ## Phase 0: Baseline and Contracts
 
