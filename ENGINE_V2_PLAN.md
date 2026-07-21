@@ -23,7 +23,7 @@ Last updated: 2026-07-21
 
 - [x] Agree the Engine V2 architecture and write this durable plan.
 - [ ] Phase 0: Baseline and contracts.
-- [ ] Phase 1: Compact executable-document parser.
+- [x] Phase 1: Compact executable-document parser.
 - [ ] Phase 2: Compiled schema representation.
 - [ ] Phase 3: Fused validation and plan compilation.
 - [ ] Phase 4: Typed resolver dispatch.
@@ -49,7 +49,7 @@ Phase 0 and broader Phase 1 executable-document coverage:
 - [x] Parse list and object input values.
 - [x] Parse named fragment definitions.
 - [x] Match decoded string and block-string value semantics.
-- [ ] Adapt compact parser failures into public `GraphQLError` parity.
+- [x] Adapt compact parser failures into public `GraphQLError` parity.
 - [x] Add lexer and parser microbenchmark measurements.
 
 Status notes and benchmark evidence must be added to this document as work lands. A checked item
@@ -259,6 +259,31 @@ not regress the compact parser hot path. Engine V1, whose lexer eagerly decodes 
 measured 2,587.04 ns at the directly comparable successful-parse boundary.
 - Full regression verification after the public-error and lazy-string milestones: 907 tests in 69
   suites passed.
+
+### 2026-07-21: Phase 1 closeout
+
+- Added 24 generated valid executable documents covering all operation kinds, variables, nested
+  selections, fragments, directives, scalar values, and container values. Engine V1 and Engine V2
+  produce equivalent normalized structures for every document.
+- Added a deterministic mutation corpus containing 763 byte deletion and punctuation-replacement
+  variants of representative executable documents. Engine V1 and Engine V2 agree on acceptance
+  or rejection for every mutation.
+- Expanded exact public parser-error parity to 14 cases and exact public lexer-error parity to 15
+  cases. Coverage includes every compact lexical failure variant, parser token and keyword errors,
+  EOF positioning, number details, escapes, ordinary and block strings, Unicode, LF, and CRLF.
+- The expanded error corpus found and corrected three parser error-state mismatches plus incomplete
+  lexical error payloads and incorrect unterminated-string positions.
+- Full regression verification: 910 tests in 69 suites passed.
+
+| Phase 1 closeout boundary | Engine V1 | Engine V2 | Speedup |
+| --- | ---: | ---: | ---: |
+| Successful lex | 1,743.19 ns | 151.05 ns | 11.5x |
+| Successful parse | 2,763.07 ns | 441.04 ns | 6.3x |
+| Malformed parse, raw | 4,688.76 ns | 329.94 ns | 14.2x |
+| Malformed parse, public error | 4,688.76 ns | 1,198.47 ns | 3.9x |
+
+Phase 1 is complete. Engine V2 remains disconnected from the public request path; Phase 2 will
+compile the existing authoritative schema into immutable numeric tables.
 
 ## Phase 0: Baseline and Contracts
 
@@ -498,9 +523,9 @@ The first implementation slice will be:
 - [x] Implement the UTF-8 lexer.
 - [x] Implement enough parser coverage for all six benchmark documents.
 - [x] Differential-test the six benchmark documents.
-- [ ] Differential-test the broader existing executable-document parser corpus.
+- [x] Differential-test the broader existing executable-document parser corpus.
 - [x] Add parse-only measurements to the benchmark harness.
-- [ ] Optimize until the malformed-query path is materially closer to Rust.
+- [x] Optimize until the malformed-query path is materially closer to Rust.
 
 Only after the parser representation proves both correctness and performance will the compiled
 schema and fused validator be built on top of it.

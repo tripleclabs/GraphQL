@@ -43,6 +43,22 @@ import Testing
         #expect(fastAccepted == referenceAccepted)
     }
 
+    @Test func generatedExecutableDocumentsMatchReference() throws {
+        for source in generatedExecutableDocuments() {
+            let reference = try parse(source: source, noLocation: true)
+            let fast = try FastParser.parse(source)
+            #expect(normalize(reference) == normalize(fast), "Generated source: \(source)")
+        }
+    }
+
+    @Test func deterministicMutationCorpusMatchesReferenceAcceptance() {
+        for source in mutatedExecutableDocuments() {
+            let referenceAccepted = (try? parse(source: source, noLocation: true)) != nil
+            let fastAccepted = (try? FastParser.parse(source)) != nil
+            #expect(fastAccepted == referenceAccepted, "Mutated source: \(source)")
+        }
+    }
+
     @Test func storesVariablesDirectivesFragmentsAndComplexValues() throws {
         let source = """
         query Search($ids: [ID!]! = ["1", "2"] @configured) @operation {
@@ -85,6 +101,16 @@ import Testing
         "query Broken { field",
         "notanoperation Foo { field }",
         "query Broken {\r\n  field(arg: \"☃\")\r\n  nested { value\r\n",
+        "{ ...MissingOn }\nfragment MissingOn Type\n",
+        "{ field: {} }",
+        "...",
+        "query",
+        "query Foo($x: Complex = { a: { b: [ $var ] } }) { field }",
+        "fragment on on on { on }",
+        "{ ...on }",
+        "query Q($id ID) { field }",
+        "query Q { field(arg [1]) }",
+        "query Q { field(arg: [1, 2) }",
     ])
     func adaptedPublicErrorsMatchReference(source: String) throws {
         let reference = try capturedGraphQLError {
@@ -102,6 +128,52 @@ import Testing
         #expect(fast.positions == reference.positions)
         #expect(fast.locations == reference.locations)
     }
+}
+
+private func generatedExecutableDocuments() -> [String] {
+    let operations = ["query", "mutation", "subscription"]
+    let scalarValues = ["1", "-2.5e+3", "true", "null", "ENUM", #""text\nvalue""#]
+    let containers = ["[1, 2, 3]", "{ enabled: true, nested: [A, B] }"]
+    var documents: [String] = []
+    for operation in operations {
+        for (index, value) in (scalarValues + containers).enumerated() {
+            documents.append(
+                "\(operation) Generated\(index)($id: [ID!]! = [\"1\"]) " +
+                    "@operation { alias: node(id: $id, value: \(value)) @field { " +
+                    "id child { name } ... on Node { kind } ...Fields } } " +
+                    "fragment Fields on Node @fragment { extra }"
+            )
+        }
+    }
+    return documents
+}
+
+private func mutatedExecutableDocuments() -> [String] {
+    let seeds = [
+        "query Q($id: ID!) { person(id: $id) { id name } }",
+        "{ people { id name species { name } } }",
+        "query Q { search(filter: { text: \"luke\", flags: [A, B] }) }",
+        "query Q { person { ... on Person { name } ...Fields } } fragment Fields on Person { id }",
+    ]
+    let replacements: [UInt8] = [0x20, 0x21, 0x24, 0x28, 0x29, 0x3A, 0x40, 0x5B, 0x5D, 0x7B, 0x7D]
+    var documents: [String] = []
+    for seed in seeds {
+        let bytes = Array(seed.utf8)
+        for index in bytes.indices {
+            var deleted = bytes
+            deleted.remove(at: index)
+            documents.append(String(decoding: deleted, as: UTF8.self))
+
+            if index % 5 == 0 {
+                for replacement in replacements {
+                    var replaced = bytes
+                    replaced[index] = replacement
+                    documents.append(String(decoding: replaced, as: UTF8.self))
+                }
+            }
+        }
+    }
+    return documents
 }
 
 private let executableFeatureCorpus = [

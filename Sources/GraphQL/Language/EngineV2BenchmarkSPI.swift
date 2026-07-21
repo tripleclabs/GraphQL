@@ -32,7 +32,7 @@ public func engineV2PublicParseError(
         return fastSyntaxError(
             source: source,
             position: Int(error.position),
-            description: fastLexErrorDescription(error)
+            description: fastLexErrorDescription(error, source: body)
         )
     }
     return GraphQLError(message: String(describing: error))
@@ -136,31 +136,53 @@ private func fastParseErrorDescription(_ error: FastParseError, source: String) 
     switch error.reason {
     case let .expected(kind):
         return "Expected \(fastTokenKindDescription(kind)), found \(found)"
+    case let .expectedKeyword(keyword):
+        return "Expected \"\(keyword)\", found \(found)"
     case .expectedName:
         return "Expected Name, found \(found)"
-    case .expectedValue:
+    case .expectedValue, .unexpected:
         return "Unexpected \(found)"
     case .unsupported:
         return "Unexpected \(found)"
     }
 }
 
-private func fastLexErrorDescription(_ error: FastLexError) -> String {
+private func fastLexErrorDescription(_ error: FastLexError, source: String) -> String {
     switch error.reason {
     case .sourceTooLarge:
         return "Source is too large."
     case let .invalidCharacter(byte):
         return "Invalid character \(Character(UnicodeScalar(byte)))."
     case let .unexpectedCharacter(byte):
-        return "Unexpected character \"\(Character(UnicodeScalar(byte)))\"."
-    case .invalidNumber:
-        return "Invalid number."
+        return "Unexpected character \(Character(UnicodeScalar(byte)))."
+    case let .invalidNumberExpectedDigit(byte):
+        let found = byte.map { String(Character(UnicodeScalar($0))) } ?? "<EOF>"
+        return "Invalid number, expected digit but got: \(found)."
+    case let .invalidNumberUnexpectedDigitAfterZero(byte):
+        return "Invalid number, unexpected digit after 0: \(Character(UnicodeScalar(byte)))."
     case .unterminatedString:
         return "Unterminated string."
+    case .unterminatedBlockString:
+        return "Unterminated blockstring"
     case let .invalidStringCharacter(byte):
         return "Invalid character within String: \(Character(UnicodeScalar(byte)))."
-    case .invalidEscape:
-        return "Invalid character escape sequence."
+    case let .invalidBlockStringCharacter(byte):
+        return "Invalid character within BlockString: \(Character(UnicodeScalar(byte)))."
+    case let .invalidEscape(range):
+        let bytes = source.utf8
+        let start = bytes.index(bytes.startIndex, offsetBy: Int(range.start))
+        let end = bytes.index(bytes.startIndex, offsetBy: Int(range.end))
+        return "Invalid character escape sequence: \(String(decoding: bytes[start ..< end], as: UTF8.self))."
+    case let .invalidUnicodeEscape(range):
+        let bytes = source.utf8
+        guard range.end - range.start >= 6 else {
+            let start = bytes.index(bytes.startIndex, offsetBy: Int(range.start))
+            let end = bytes.index(bytes.startIndex, offsetBy: Int(range.end))
+            return "Invalid character escape sequence: \(String(decoding: bytes[start ..< end], as: UTF8.self))."
+        }
+        let start = bytes.index(bytes.startIndex, offsetBy: Int(range.start) + 2)
+        let end = bytes.index(bytes.startIndex, offsetBy: Int(range.end) - 1)
+        return "Invalid character escape sequence: \\u\(bytes[start ... end])."
     }
 }
 

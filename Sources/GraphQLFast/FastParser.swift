@@ -5,8 +5,10 @@ public struct FastParseError: Error, Sendable, Equatable, CustomStringConvertibl
 
     public enum Reason: Sendable, Equatable {
         case expected(FastTokenKind)
+        case expectedKeyword(String)
         case expectedName
         case expectedValue
+        case unexpected
         case unsupported(String)
     }
 
@@ -90,7 +92,8 @@ private struct Parser {
             return
         }
 
-        let operationToken = try expectName()
+        guard current.kind == .name else { throw parseError(.unexpected) }
+        let operationToken = advance()
         let operationKind: FastOperation.Kind
         if matches(operationToken, "query") {
             operationKind = .query
@@ -122,11 +125,11 @@ private struct Parser {
         _ = advance() // fragment
         let name = try expectName()
         if matches(name, "on") {
-            throw parseError(.expectedName, at: name)
+            throw parseError(.unexpected, at: name)
         }
         let on = try expectName()
         guard matches(on, "on") else {
-            throw parseError(.expectedName, at: on)
+            throw parseError(.expectedKeyword("on"), at: on)
         }
         let typeCondition = try expectName().range
         let directives = try parseDirectives()

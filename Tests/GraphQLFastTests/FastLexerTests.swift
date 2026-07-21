@@ -1,4 +1,4 @@
-@testable import GraphQL
+@_spi(EngineV2Benchmark) @testable import GraphQL
 import GraphQLFast
 import Testing
 
@@ -67,6 +67,56 @@ import Testing
             #expect(Int(fastToken.range.start) == referenceToken.start)
             #expect(Int(fastToken.range.end) == referenceToken.end)
         }
+    }
+
+    @Test(arguments: [
+        "?",
+        "\u{0007}",
+        "00",
+        "-A",
+        "1.",
+        "1.0e",
+        "1.0eA",
+        #"{ field(arg: "bad \z esc") }"#,
+        #"{ field(arg: "bad \u0XX1 esc") }"#,
+        "{ field(arg: \"bad \u{0007} value\") }",
+        "{ field(arg: \"multi\nline\") }",
+        #"{ field(arg: "unterminated) }"#,
+        "{ field(arg: \"\"\"bad \u{0007} block\"\"\") }",
+        #"{ field(arg: """unterminated) }"#,
+        "※",
+    ])
+    func adaptedPublicLexErrorsMatchReference(source: String) throws {
+        let reference = try captureGraphQLError {
+            try parse(source: source)
+        }
+        let fast = try captureGraphQLError {
+            do {
+                _ = try FastParser.parse(source)
+            } catch {
+                throw engineV2PublicParseError(error, source: source)
+            }
+        }
+
+        #expect(fast.message == reference.message)
+        #expect(fast.positions == reference.positions)
+        #expect(fast.locations == reference.locations)
+    }
+}
+
+private enum LexExpectedError: Error {
+    case noneThrown
+    case wrongType(any Error)
+}
+
+private func captureGraphQLError<T>(_ operation: () throws -> T) throws -> GraphQLError {
+    do {
+        _ = try operation()
+        throw LexExpectedError.noneThrown
+    } catch let error as GraphQLError {
+        return error
+    } catch {
+        throw LexExpectedError.wrongType(error)
     }
 }
 

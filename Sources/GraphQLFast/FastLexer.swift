@@ -42,10 +42,14 @@ public struct FastLexError: Error, Sendable, Equatable, CustomStringConvertible 
         case sourceTooLarge
         case invalidCharacter(UInt8)
         case unexpectedCharacter(UInt8)
-        case invalidNumber
+        case invalidNumberExpectedDigit(UInt8?)
+        case invalidNumberUnexpectedDigitAfterZero(UInt8)
         case unterminatedString
+        case unterminatedBlockString
         case invalidStringCharacter(UInt8)
-        case invalidEscape
+        case invalidBlockStringCharacter(UInt8)
+        case invalidEscape(FastSourceRange)
+        case invalidUnicodeEscape(FastSourceRange)
     }
 
     public var description: String {
@@ -180,16 +184,20 @@ private struct Scanner {
         var kind = FastTokenKind.integer
         if bytes[position] == 0x2D {
             position += 1
-            guard position < bytes.count else { throw error(.invalidNumber, at: start) }
+            guard position < bytes.count else {
+                throw error(.invalidNumberExpectedDigit(nil), at: position)
+            }
         }
 
         if bytes[position] == 0x30 {
             position += 1
             if position < bytes.count, isDigit(bytes[position]) {
-                throw error(.invalidNumber, at: position)
+                throw error(.invalidNumberUnexpectedDigitAfterZero(bytes[position]), at: position)
             }
         } else {
-            guard isNonZeroDigit(bytes[position]) else { throw error(.invalidNumber, at: position) }
+            guard isNonZeroDigit(bytes[position]) else {
+                throw error(.invalidNumberExpectedDigit(bytes[position]), at: position)
+            }
             repeat { position += 1 } while position < bytes.count && isDigit(bytes[position])
         }
 
@@ -197,7 +205,10 @@ private struct Scanner {
             kind = .float
             position += 1
             guard position < bytes.count, isDigit(bytes[position]) else {
-                throw error(.invalidNumber, at: position)
+                throw error(
+                    .invalidNumberExpectedDigit(position < bytes.count ? bytes[position] : nil),
+                    at: position
+                )
             }
             repeat { position += 1 } while position < bytes.count && isDigit(bytes[position])
         }
@@ -209,13 +220,16 @@ private struct Scanner {
                 position += 1
             }
             guard position < bytes.count, isDigit(bytes[position]) else {
-                throw error(.invalidNumber, at: position)
+                throw error(
+                    .invalidNumberExpectedDigit(position < bytes.count ? bytes[position] : nil),
+                    at: position
+                )
             }
             repeat { position += 1 } while position < bytes.count && isDigit(bytes[position])
         }
 
         if position < bytes.count, isNameStart(bytes[position]) {
-            throw error(.invalidNumber, at: position)
+            throw error(.invalidNumberExpectedDigit(bytes[position]), at: position)
         }
         append(kind, start, position)
     }
@@ -227,8 +241,13 @@ private struct Scanner {
            bytes[position + 2] == 0x22
         {
             position += 3
-            while position + 2 < bytes.count {
-                if bytes[position] == 0x22,
+            while position < bytes.count {
+                let byte = bytes[position]
+                if byte < 0x20, byte != 0x09, byte != 0x0A, byte != 0x0D {
+                    throw error(.invalidBlockStringCharacter(byte))
+                }
+                if position + 2 < bytes.count,
+                   bytes[position] == 0x22,
                    bytes[position + 1] == 0x22,
                    bytes[position + 2] == 0x22,
                    position == start + 3 || bytes[position - 1] != 0x5C
@@ -239,7 +258,8 @@ private struct Scanner {
                 }
                 position += 1
             }
-            throw error(.unterminatedString, at: start)
+            position = bytes.count
+            throw error(.unterminatedBlockString)
         }
 
         position += 1
@@ -250,30 +270,44 @@ private struct Scanner {
                 append(.string, start, position)
                 return
             }
-            if byte == 0x0A || byte == 0x0D || byte < 0x20 {
+            if byte == 0x0A || byte == 0x0D {
+                throw error(.unterminatedString)
+            }
+            if byte < 0x20 {
                 throw error(.invalidStringCharacter(byte))
             }
             if byte == 0x5C {
+                let escapeStart = position
                 position += 1
-                guard position < bytes.count else { throw error(.unterminatedString, at: start) }
+                guard position < bytes.count else { throw error(.unterminatedString) }
                 switch bytes[position] {
                 case 0x22, 0x2F, 0x5C, 0x62, 0x66, 0x6E, 0x72, 0x74:
                     position += 1
                 case 0x75:
+                    let unicodePosition = position
                     position += 1
-                    guard position + 3 < bytes.count else { throw error(.invalidEscape) }
+                    let escapeEnd = min(escapeStart + 6, bytes.count)
+                    guard position + 3 < bytes.count else {
+                        throw error(.invalidUnicodeEscape(FastSourceRange(
+                            start: UInt32(escapeStart), end: UInt32(escapeEnd)
+                        )), at: unicodePosition)
+                    }
                     for index in position ..< position + 4 where !isHex(bytes[index]) {
-                        throw error(.invalidEscape, at: index)
+                        throw error(.invalidUnicodeEscape(FastSourceRange(
+                            start: UInt32(escapeStart), end: UInt32(escapeEnd)
+                        )), at: unicodePosition)
                     }
                     position += 4
                 default:
-                    throw error(.invalidEscape)
+                    throw error(.invalidEscape(FastSourceRange(
+                        start: UInt32(escapeStart), end: UInt32(min(escapeStart + 2, bytes.count))
+                    )))
                 }
             } else {
                 position += 1
             }
         }
-        throw error(.unterminatedString, at: start)
+        throw error(.unterminatedString)
     }
 
     mutating func appendSingle(_ kind: FastTokenKind) {
