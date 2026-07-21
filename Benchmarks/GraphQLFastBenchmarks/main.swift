@@ -35,6 +35,18 @@ private let parsedSuccessfulQuery = try! FastParser.parse(successfulQuery)
 private let parsedEscapedStringQuery = try! FastParser.parse(escapedStringQuery)
 private let parsedBlockStringQuery = try! FastParser.parse(blockStringQuery)
 private let benchmarkSchema = try! makeBenchmarkSchema()
+private let benchmarkRootValue: [String: any Sendable] = [
+    "person": [
+        "id": "1",
+        "name": "Luke Skywalker",
+        "birthYear": "19BBY",
+        "species": [
+            "id": "3",
+            "name": "Human",
+            "classification": "mammal",
+        ] as [String: any Sendable],
+    ] as [String: any Sendable],
+]
 private let cachedBenchmarkSchema = try! engineV2CachedSchema(benchmarkSchema)
 private let benchmarkQueryTypeID = cachedBenchmarkSchema.typeID(named: "Query")!
 private let benchmarkSearchResultTypeID = cachedBenchmarkSchema.typeID(named: "SearchResult")!
@@ -184,6 +196,40 @@ private func firstArgumentValue(in document: FastDocument) -> UInt32 {
     document.arguments[0].value
 }
 
+@inline(never)
+private func consumeResult(_ result: GraphQLResult?) -> Int {
+    guard let result else { return 0 }
+    return withExtendedLifetime(result) {
+        var checksum = result.errors.count
+        if case let .dictionary(fields) = result.data {
+            checksum &+= fields.count
+        }
+        return checksum
+    }
+}
+
+private func measureAsync(
+    _ name: String,
+    operation: () async -> Int
+) async -> Measurement {
+    var checksum = 0
+    for _ in 0 ..< warmup {
+        checksum &+= await operation()
+    }
+
+    var samples: [Double] = []
+    samples.reserveCapacity(sampleCount)
+    for _ in 0 ..< sampleCount {
+        let start = DispatchTime.now().uptimeNanoseconds
+        for _ in 0 ..< iterations {
+            checksum &+= await operation()
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - start
+        samples.append(Double(elapsed) / Double(iterations))
+    }
+    return Measurement(name: name, samples: samples, checksum: checksum)
+}
+
 private func measure(
     _ name: String,
     operation: () throws -> Int
@@ -328,7 +374,8 @@ private func makeBenchmarkSchema() throws -> GraphQLSchema {
         fields: [
             "person": GraphQLField(
                 type: person,
-                args: ["id": GraphQLArgument(type: GraphQLNonNull(GraphQLID))]
+                args: ["id": GraphQLArgument(type: GraphQLNonNull(GraphQLID))],
+                fastResolve: { source in (source as? [String: any Sendable])?["person"] }
             ),
             "people": GraphQLField(type: GraphQLNonNull(GraphQLList(GraphQLNonNull(person)))),
             "resolverProbe": GraphQLField(
@@ -341,10 +388,46 @@ private func makeBenchmarkSchema() throws -> GraphQLSchema {
     return try GraphQLSchema(query: query, types: [searchResult])
 }
 
+// End-to-end `single_item` request boundaries. Engine V1 runs through the real async `graphql`
+// pipeline (parse, validate, execute, materialize). Engine V2 runs the synchronous vertical slice
+// (compact parse, fused numeric plan, synchronous execute, public `Map` materialization). Engine V2
+// does not yet perform schema/document validation, so this pair is an architectural signal, not a
+// final honest end-to-end comparison until validation parity lands.
+private let v1EndToEnd = await measureAsync("v1_execute_single_item_e2e") {
+    consumeResult(try? await graphql(
+        schema: benchmarkSchema,
+        request: successfulQuery,
+        rootValue: benchmarkRootValue
+    ))
+}
+// Engine V1 execute + materialize only, with parsing and validation hoisted out of the loop. This
+// isolates the request work most comparable to the Engine V2 slice and removes the schema/document
+// validation that Engine V2 does not yet perform, so the architectural gap is not overstated.
+private let v1ParsedDocument = try! parse(source: successfulQuery)
+private let v1ExecuteOnly = await measureAsync("v1_execute_single_item_execute_only") {
+    consumeResult(try? await execute(
+        schema: benchmarkSchema,
+        documentAST: v1ParsedDocument,
+        rootValue: benchmarkRootValue,
+        context: (),
+        variableValues: [:],
+        operationName: nil
+    ))
+}
+private let v2EndToEnd = measure("v2_execute_single_item_e2e") {
+    consumeResult(engineV2ExecuteSingleItem(
+        benchmarkSchema,
+        successfulQuery,
+        rootValue: benchmarkRootValue
+    ))
+}
+private let endToEndMeasurements = [v1EndToEnd, v1ExecuteOnly, v2EndToEnd]
+
 print("Release microbenchmark: \(warmup) warmups, \(iterations) iterations, \(sampleCount) samples")
 print("| Boundary | Median |")
 print("| --- | ---: |")
-for measurement in measurements {
+for measurement in measurements + endToEndMeasurements {
     print("| \(measurement.name) | \(String(format: "%.2f ns", measurement.median)) |")
 }
-print("checksum=\(measurements.reduce(0) { $0 &+ $1.checksum })")
+let e2eChecksum = endToEndMeasurements.reduce(0) { $0 &+ $1.checksum }
+print("checksum=\(measurements.reduce(0) { $0 &+ $1.checksum } &+ e2eChecksum)")

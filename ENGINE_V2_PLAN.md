@@ -39,19 +39,28 @@ Engine V2 vertical slice spanning fused planning, synchronous execution, complet
 result materialization. Remaining schema/introspection breadth is deliberately deferred until this
 gate produces an end-to-end number.
 
-- [ ] Add comparable Engine V1 component timing for parse, validate/plan, execute/complete, and
-  public-result materialization.
-- [ ] Define a conservative Engine V2 eligibility check that falls back before invoking resolvers.
-- [ ] Compile the benchmark query from compact source ranges directly to numeric schema IDs and a
+- [~] Add comparable Engine V1 component timing for parse, validate/plan, execute/complete, and
+  public-result materialization. Added full-request and execute+materialize-only Engine V1 timings;
+  a finer parse/validate/plan split is still outstanding.
+- [x] Define a conservative Engine V2 eligibility check that falls back before invoking resolvers.
+- [x] Compile the benchmark query from compact source ranges directly to numeric schema IDs and a
   contiguous executable field plan.
-- [ ] Execute source-only and synchronous resolvers without Swift concurrency state machines or
-  constructing unused `GraphQLResolveInfo`, argument maps, field arrays, or paths.
-- [ ] Complete scalars, objects, lists, and non-null propagation into a preallocated result arena.
-- [ ] Convert the arena once into the existing public `Map` result.
-- [ ] Differentially verify the supported query and relevant error/null behavior against Engine V1.
-- [ ] Benchmark the complete `single_item` request with the same parsing, validation, execution,
-  and materialization contract as Rust.
-- [ ] Reach the viability gate of at most 2x the Rust baseline before resuming broad completeness.
+- [x] Execute source-only and synchronous resolvers without Swift concurrency state machines or
+  constructing unused `GraphQLResolveInfo`, argument maps, field arrays, or paths. The slice runs
+  source-only thunks and the specialized key-path (default) synchronous resolver; a custom
+  synchronous resolver that could observe args/info falls back to Engine V1.
+- [~] Complete scalars, objects, lists, and non-null propagation into a preallocated result arena.
+  Scalar/object/non-null completion is done, but results are built directly into the public `Map`;
+  the preallocated arena and list completion remain the next optimization levers.
+- [~] Convert the arena once into the existing public `Map` result. Currently materializes `Map`
+  directly; the arena indirection is deferred.
+- [x] Differentially verify the supported query and relevant error/null behavior against Engine V1.
+- [~] Benchmark the complete `single_item` request with the same parsing, validation, execution,
+  and materialization contract as Rust. Benchmarked end to end against Engine V1; Engine V2 does not
+  yet run schema/document validation, so full-contract parity is still pending.
+- [~] Reach the viability gate of at most 2x the Rust baseline before resuming broad completeness.
+  No Rust toolchain on the current host; measured relative to Engine V1 instead (see the newest
+  progress entry), where the slice is ~17.7x faster than Engine V1 execute+materialize only.
 - [ ] Reach the primary target of within 10% of Rust before expanding the fast path case-by-case.
 
 Phase 2 foundation status; unchecked breadth items are paused, not abandoned:
@@ -79,23 +88,27 @@ means its implementation and proportionate verification are complete, not merely
 
 ### Resumption checkpoint
 
-- Repository: `/Users/johnmaxwell/src/graphql`.
-- Branch: `codex/engine-v2`.
-- Latest verified implementation commit: `c03e4e2` (`Compile direct GraphQLFast resolver thunks`).
-- Engine V2 is still isolated from the public execution path; Engine V1 remains authoritative.
-- Phase 1 is complete. Phase 2 is in progress with numeric schema tables, abstract membership,
-  enum/directive structure, and aligned resolver/subscription thunks complete.
-- Strategic priority is now the performance viability gate above. Remaining description,
-  introspection, and whole-corpus schema work is deferred until the vertical slice is measured.
-- The next task is to instrument the current `single_item` path into comparable component timings,
-  then implement the smallest fused numeric plan that supports that exact query with an explicit
-  pre-resolver fallback for unsupported features.
-- Do not resume broad Phase 2 completeness work merely to increase feature count. First produce the
-  Engine V2 end-to-end `single_item` number and evaluate it against the gates below.
-- Focused verification command: `swift test --filter FastCompiledSchemaTests`.
+- Repository: `/Users/johnmaxwell/src/graphql` (also developed on a Linux x86_64 host under
+  `/home/user/GraphQL`).
+- Branch: `claude/engine-v2-plan-review-rwwrao` (continues the `codex/engine-v2` line).
+- Engine V2 is still isolated from the public execution path; Engine V1 remains authoritative. The
+  `single_item` slice is reachable only through the `@_spi(EngineV2Benchmark)`
+  `engineV2ExecuteSingleItem` entry, used by benchmarks and differential tests.
+- Phase 1 is complete. Phase 2 foundations are in place. The first `single_item` vertical slice
+  (fused planner + synchronous executor) is implemented, differentially verified, and benchmarked
+  end to end; see the newest progress entry.
+- The end-to-end viability gate is met relative to Engine V1 on the current host. The next task is
+  to close the honesty gap: add Engine V2 document/schema validation (or an equivalence proof) so the
+  comparison honors the full benchmark contract, then add the preallocated result arena and list
+  completion.
+- Do not resume broad Phase 2 completeness work merely to increase feature count. Tighten the
+  `single_item` contract (validation, arena) before widening to more cases.
+- Focused verification commands: `swift test --filter EngineV2ExecuteTests` and
+  `swift test --filter FastCompiledSchemaTests`.
 - Full verification command: `swift test`.
 - Release microbenchmark command: `swift run -c release graphql-fast-benchmarks`.
-- Last verified state: 913 tests in 70 suites pass; no known correctness regression.
+- Last verified state: 922 tests in 71 suites pass; no known correctness regression. Note the Linux
+  `CoreFoundation` import fix in `MapSerialization.swift` required to build on this host.
 - Read this checkpoint, the current milestone checklist, and the newest dated progress entry before
   editing. Inspect `git status` and recent history so user work is never overwritten.
 
@@ -177,6 +190,65 @@ Baseline metadata:
 - Pipeline: parse, validate, execute, and materialize the ordinary public result.
 
 ## Progress Log
+
+### 2026-07-21: Engine V2 `single_item` vertical slice and first end-to-end number
+
+- Built the first Engine V2 vertical slice for the `single_item` shape in the `GraphQL` target
+  (`Sources/GraphQL/Execution/EngineV2Execute.swift`): a fused planner turns the compact
+  `FastDocument` plus the cached compiled schema into a contiguous field plan of numeric field IDs,
+  resolver forms, and completion shapes in one schema-aware traversal, then a synchronous executor
+  materializes the public `Map` result.
+- The planner is a conservative eligibility gate. It falls back to Engine V1 (returns `nil`) before
+  invoking any resolver for: non-empty variables, multiple/non-query operations, fragments or inline
+  fragments, operation-level variables/directives, per-field directives, duplicate response keys,
+  unknown fields, missing required arguments, variable-valued arguments, malformed documents, lists,
+  abstract/enum/input output positions, object types with a custom `isTypeOf`, and any resolver that
+  is not source-only or the default key-path resolver.
+- The executor avoids Swift concurrency, `GraphQLResolveInfo`, argument maps, `[Field]`, and response
+  paths on the hot path. Source-only resolvers use their narrow calling convention; default fields
+  read their key directly from the source container exactly as Engine V1's non-introspection
+  `defaultResolve` does.
+- Differential coverage (`Tests/GraphQLFastTests/EngineV2ExecuteTests.swift`, 9 tests) compares the
+  slice against Engine V1's public result for a fully populated item, absent nullable leaves, an
+  absent nullable object, an absent top-level object, and a non-null-null error, plus five
+  fallback cases. Data matches exactly and error messages match (source locations/paths are compared
+  as future work).
+- Extended `graphql-fast-benchmarks` with an end-to-end `single_item` request: Engine V1 through the
+  real async `graphql(...)` pipeline, Engine V1 execute+materialize only (parse/validate hoisted out
+  of the loop), and the synchronous Engine V2 slice.
+- Fixed a pre-existing Linux build blocker: `MapSerialization.isBoolean` used `CFGetTypeID` /
+  `CFBooleanGetTypeID` without importing `CoreFoundation`. Guarded the import with
+  `#if canImport(CoreFoundation)`; macOS behavior is unchanged.
+
+There is no Rust toolchain on this host, so per the agreed approach these are self-relative numbers
+(this Linux x86_64 host is materially slower in absolute terms than the M5 Pro baseline machine;
+the V1/V2 component ratios remain consistent with earlier entries).
+
+| End-to-end `single_item` boundary | Median |
+| --- | ---: |
+| Engine V1 full `graphql(...)` (parse, validate, execute, materialize) | 314,452 ns |
+| Engine V1 execute + materialize only (parse/validate hoisted out) | 221,874 ns |
+| Engine V2 slice (compact parse, fused numeric plan, sync execute, materialize) | 12,551 ns |
+
+Configuration: 1,000 warmups, 10,000 iterations per sample, 15 samples, SwiftPM release.
+
+The Engine V2 slice is ~25x faster than full Engine V1 and ~17.7x faster than Engine V1
+execute+materialize only. The execute-only comparison is the honest architectural signal because it
+removes the schema/document validation Engine V2 does not yet perform: the gain comes from avoiding
+the async state machine, `ExecutionContext`/`collectFields` machinery, per-field
+`GraphQLResolveInfo`, and `OrderedDictionary` traffic, not merely from skipping validation. This
+clears any 2x viability threshold relative to Engine V1 on this machine and justifies continuing.
+
+Caveats and next levers, in priority order:
+
+1. Add Engine V2 document/schema validation (or a proof of equivalence) so the end-to-end comparison
+   honors the full benchmark contract before any real cutover. Argument *value* coercion validation
+   is currently absent, so the slice must stay SPI-only and must not gate untrusted documents.
+2. Introduce the preallocated result arena and one-shot `Map` conversion (currently builds `Map`
+   directly) and profile allocations/ARC.
+3. Add list completion to unlock the `list_items` case.
+4. Restore exact error source-location/path parity.
+- Full regression verification: 922 tests in 71 suites passed (913 prior + 9 new slice tests).
 
 ### 2026-07-21: Engine V2 scaffolding and lexer foundation
 

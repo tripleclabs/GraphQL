@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreFoundation)
+    import CoreFoundation
+#endif
 import OrderedCollections
 
 public struct MapSerialization {

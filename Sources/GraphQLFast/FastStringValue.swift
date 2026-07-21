@@ -5,6 +5,22 @@ public enum FastValueAccessError: Error, Sendable, Equatable {
 }
 
 public extension FastDocument {
+    /// Materializes the UTF-8 bytes of a source range as a `String`. Used for name lookups where a
+    /// concrete key is unavoidable; literal string values still decode lazily through
+    /// `decodedString(valueAt:)`.
+    @inlinable
+    func text(_ range: FastSourceRange) -> String {
+        let start = Int(range.start)
+        let end = Int(range.end)
+        if let decoded = source.utf8.withContiguousStorageIfAvailable({ bytes in
+            String(decoding: bytes[start ..< end], as: UTF8.self)
+        }) {
+            return decoded
+        }
+        let bytes = ContiguousArray(source.utf8)
+        return String(decoding: bytes[start ..< end], as: UTF8.self)
+    }
+
     /// Decodes a string literal on demand. Plain unescaped strings take a single UTF-8 slice;
     /// escaped and block strings pay their normalization cost only when validation or execution
     /// actually requests the value.
