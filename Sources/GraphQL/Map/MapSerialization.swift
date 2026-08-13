@@ -1,4 +1,14 @@
 import Foundation
+// `isBoolean` below reaches for CFGetTypeID/CFBooleanGetTypeID on the
+// corelibs-Foundation platforms. Darwin re-exports CoreFoundation through
+// Foundation, so there it is already in scope; Linux does not, and the file
+// fails to compile ("cannot find 'CFGetTypeID' in scope") without this import.
+// swift-corelibs-foundation makes the same check the same way — its
+// JSONSerialization imports CoreFoundation before comparing against
+// CFBooleanGetTypeID().
+#if canImport(CoreFoundation)
+    import CoreFoundation
+#endif
 import OrderedCollections
 
 public struct MapSerialization {
