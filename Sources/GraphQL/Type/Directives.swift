@@ -164,7 +164,7 @@ public let GraphQLOneOfDirective = try! GraphQLDirective(
 /**
  * The full list of specified directives.
  */
-let specifiedDirectives: [GraphQLDirective] = [
+public let specifiedDirectives: [GraphQLDirective] = [
     GraphQLIncludeDirective,
     GraphQLSkipDirective,
     GraphQLDeprecatedDirective,
