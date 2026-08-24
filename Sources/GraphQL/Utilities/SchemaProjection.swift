@@ -36,10 +36,19 @@ public extension GraphQLSchema {
         )
 
         while true {
+            // Only interfaces something in the view can *return* need their
+            // implementations: that is the only case where the runtime has to
+            // resolve a concrete type. An interface present merely because a
+            // retained object declares it can never be returned here, and
+            // pulling in its other implementors would drag most of the schema
+            // into every view.
+            let returnable = schema.returnableInterfaceNames()
+
             var additions: [GraphQLNamedType] = []
             for type in schema.typeMap.values {
                 guard
                     let interface = type as? GraphQLInterfaceType,
+                    returnable.contains(interface.name),
                     let impls = implementations[interface.name]
                 else {
                     continue
@@ -134,6 +143,36 @@ private extension GraphQLSchema {
             return enumType.values.contains { $0.name == member }
         }
         return false
+    }
+
+    /// Names of interfaces appearing in an output-type position on any field of
+    /// this schema, unwrapping list and non-null wrappers.
+    func returnableInterfaceNames() -> Set<String> {
+        var names: Set<String> = []
+
+        func record(_ type: GraphQLType) {
+            if let wrapper = type as? GraphQLWrapperType {
+                record(wrapper.wrappedType)
+                return
+            }
+            if let interface = type as? GraphQLInterfaceType {
+                names.insert(interface.name)
+            }
+        }
+
+        for type in typeMap.values {
+            if let object = type as? GraphQLObjectType {
+                for (_, field) in (try? object.getFields()) ?? [:] {
+                    record(field.type)
+                }
+            } else if let interface = type as? GraphQLInterfaceType {
+                for (_, field) in (try? interface.getFields()) ?? [:] {
+                    record(field.type)
+                }
+            }
+        }
+
+        return names
     }
 
     func arguments(ofField fieldName: String, on typeName: String) -> [GraphQLArgumentDefinition] {

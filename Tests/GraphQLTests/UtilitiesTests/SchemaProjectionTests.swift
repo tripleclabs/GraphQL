@@ -156,3 +156,136 @@ private func interfaceSchema() throws -> GraphQLSchema {
         #expect(result.data?["node"]["__typename"].string == "Account")
     }
 }
+
+/// Completeness only needs implementations for interfaces something in the view
+/// can actually *return* — the runtime resolves a concrete type only then. An
+/// interface present merely because a retained object declares it can never be
+/// returned, so its other implementors are dead weight.
+@Suite struct SchemaProjectionInterfaceScopeTests {
+    private func siblingSchema() throws -> GraphQLSchema {
+        let iface = try GraphQLInterfaceType(
+            name: "Iface",
+            fields: { ["id": GraphQLField(type: GraphQLString)] }
+        )
+        var siblings: [GraphQLObjectType] = []
+        for i in 0 ..< 5 {
+            siblings.append(try GraphQLObjectType(
+                name: "Sibling\(i)",
+                fields: { ["id": GraphQLField(type: GraphQLString)] },
+                interfaces: { [iface] },
+                isTypeOf: { src, _ in (src as? [String: String])?["k"] == "s\(i)" }
+            ))
+        }
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: [
+                "concrete": GraphQLField(
+                    type: siblings[0],
+                    resolve: { _, _, _, _ in ["k": "s0", "id": "1"] }
+                ),
+                "abstract": GraphQLField(
+                    type: iface,
+                    resolve: { _, _, _, _ in ["k": "s0", "id": "1"] }
+                ),
+            ]
+        )
+        return try GraphQLSchema(query: query, types: siblings)
+    }
+
+    private func userTypes(_ schema: GraphQLSchema) -> [String] {
+        schema.typeMap.keys
+            .filter { !$0.hasPrefix("__") && !["String", "Boolean", "Query"].contains($0) }
+            .sorted()
+    }
+
+    @Test func concreteReturnDoesNotPullInInterfaceSiblings() throws {
+        let projected = try siblingSchema().projected { _, field in field == "concrete" }
+        // Sibling0 declares Iface, so Iface comes along — but nothing here can
+        // return Iface, so Sibling1...4 are not needed.
+        #expect(userTypes(projected) == ["Iface", "Sibling0"])
+    }
+
+    @Test func abstractReturnStillPullsInAllImplementors() throws {
+        let projected = try siblingSchema().projected { _, field in field == "abstract" }
+        #expect(userTypes(projected) == [
+            "Iface", "Sibling0", "Sibling1", "Sibling2", "Sibling3", "Sibling4",
+        ])
+    }
+
+    @Test func concreteProjectionStillExecutes() async throws {
+        let projected = try siblingSchema().projected { _, field in field == "concrete" }
+        let result = try await graphql(schema: projected, request: "{ concrete { id } }")
+        #expect(result.errors.isEmpty)
+        #expect(result.data?["concrete"]["id"].string == "1")
+    }
+
+    @Test func abstractProjectionStillResolvesConcreteType() async throws {
+        let projected = try siblingSchema().projected { _, field in field == "abstract" }
+        let result = try await graphql(schema: projected, request: "{ abstract { __typename } }")
+        #expect(result.errors.isEmpty)
+        #expect(result.data?["abstract"]["__typename"].string == "Sibling0")
+    }
+}
+
+@Suite struct SchemaProjectionUnionAndNestedInterfaceTests {
+    @Test func unionMembersSurviveAndExecute() async throws {
+        let a = try GraphQLObjectType(
+            name: "A",
+            fields: { ["x": GraphQLField(type: GraphQLString)] },
+            isTypeOf: { src, _ in (src as? [String: String])?["k"] == "a" }
+        )
+        let b = try GraphQLObjectType(
+            name: "B",
+            fields: { ["y": GraphQLField(type: GraphQLString)] },
+            isTypeOf: { src, _ in (src as? [String: String])?["k"] == "b" }
+        )
+        let result = try GraphQLUnionType(name: "Result", types: [a, b])
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: [
+                "find": GraphQLField(type: result, resolve: { _, _, _, _ in ["k": "a", "x": "hi"] }),
+                "other": GraphQLField(type: GraphQLString),
+            ]
+        )
+        let projected = try GraphQLSchema(query: query).projected { _, f in f == "find" }
+        #expect(projected.typeMap["A"] != nil)
+        #expect(projected.typeMap["B"] != nil)
+
+        let response = try await graphql(schema: projected, request: "{ find { __typename } }")
+        #expect(response.errors.isEmpty)
+        #expect(response.data?["find"]["__typename"].string == "A")
+    }
+
+    @Test func interfaceImplementingInterfaceSurvivesAndExecutes() async throws {
+        let node = try GraphQLInterfaceType(
+            name: "Node",
+            fields: { ["id": GraphQLField(type: GraphQLString)] }
+        )
+        let resource = try GraphQLInterfaceType(
+            name: "Resource",
+            fields: { ["id": GraphQLField(type: GraphQLString)] },
+            interfaces: { [node] }
+        )
+        let doc = try GraphQLObjectType(
+            name: "Doc",
+            fields: { ["id": GraphQLField(type: GraphQLString)] },
+            interfaces: { [resource, node] },
+            isTypeOf: { src, _ in (src as? [String: String])?["k"] == "doc" }
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: [
+                "node": GraphQLField(type: node, resolve: { _, _, _, _ in ["k": "doc", "id": "1"] }),
+            ]
+        )
+        let schema = try GraphQLSchema(query: query, types: [doc, resource])
+        let projected = try schema.projected { _, _ in true }
+
+        #expect(projected.typeMap["Doc"] != nil)
+        #expect(projected.typeMap["Resource"] != nil)
+
+        let response = try await graphql(schema: projected, request: "{ node { __typename } }")
+        #expect(response.errors.isEmpty)
+        #expect(response.data?["node"]["__typename"].string == "Doc")
+    }
+}
