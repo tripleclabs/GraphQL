@@ -353,7 +353,10 @@ private func memberDirectiveDefinitions() throws -> [GraphQLDirective] {
 
     @Test func schemaBlockIsOmittedWithoutSchemaDirective() throws {
         let sdl = printSchema(schema: try linkSchema())
-        #expect(!sdl.contains("schema"))
+        // Not `contains("schema")` — the directive definition line contains
+        // "on SCHEMA", and lowercase "schema" only ever appears as the block.
+        #expect(!sdl.contains("schema {"))
+        #expect(!sdl.hasPrefix("schema"))
     }
 
     @Test func schemaDirectiveForcesSchemaBlockToPrint() throws {
@@ -367,5 +370,66 @@ private func memberDirectiveDefinitions() throws -> [GraphQLDirective] {
         )
         #expect(sdl.contains("schema @link(url: \"https://example.com/v1\") {"))
         #expect(sdl.contains("  query: Query"))
+    }
+}
+
+/// `printInterface` carries its own copy of the `printFields` call that
+/// `printObject` makes. These pin the interface copy independently, so a wrong
+/// `typeName` threaded through it cannot hide behind the object-side tests.
+@Suite struct PrintSchemaInterfaceMemberDirectivesTests {
+    private func schema() throws -> GraphQLSchema {
+        let node = try GraphQLInterfaceType(
+            name: "Node",
+            fields: [
+                "id": GraphQLField(
+                    type: GraphQLString,
+                    args: ["raw": GraphQLArgument(type: GraphQLString)]
+                ),
+            ]
+        )
+        let user = try GraphQLObjectType(
+            name: "User",
+            fields: [
+                "id": GraphQLField(
+                    type: GraphQLString,
+                    args: ["raw": GraphQLArgument(type: GraphQLString)]
+                ),
+            ],
+            interfaces: [node]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["user": GraphQLField(type: user)]
+        )
+        return try GraphQLSchema(
+            query: query,
+            types: [node, user],
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+    }
+
+    @Test func printsDirectiveOnInterfaceField() throws {
+        let sdl = printSchema(
+            schema: try schema(),
+            appliedDirectives: [
+                .member(type: "Node", member: "id"): [AppliedDirective(name: "unique")],
+            ]
+        )
+        #expect(sdl.contains("interface Node {"))
+        #expect(sdl.contains("id(raw: String): String @unique"))
+        // The identically-named object field must NOT pick it up.
+        #expect(!sdl.contains("type User implements Node {\n  id(raw: String): String @unique"))
+    }
+
+    @Test func printsDirectiveOnInterfaceFieldArgument() throws {
+        let sdl = printSchema(
+            schema: try schema(),
+            appliedDirectives: [
+                .argument(type: "Node", field: "id", argument: "raw"): [
+                    AppliedDirective(name: "unique"),
+                ],
+            ]
+        )
+        #expect(sdl.contains("id(raw: String @unique): String"))
     }
 }

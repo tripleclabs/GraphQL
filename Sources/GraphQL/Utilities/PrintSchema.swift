@@ -1,5 +1,11 @@
 import Foundation
 
+/// Renders a schema as SDL.
+///
+/// - Parameter appliedDirectives: Directives to render at schema locations,
+///   keyed by path. Applied directives are not stored on the schema's type
+///   objects, so they must be supplied here — omitting them (as the
+///   single-argument call does) yields SDL with no applied directives.
 public func printSchema(
     schema: GraphQLSchema,
     appliedDirectives: AppliedDirectiveMap = [:]
@@ -12,6 +18,10 @@ public func printSchema(
     )
 }
 
+/// Renders the introspection schema as SDL.
+///
+/// - Note: Never renders applied directives; introspection types cannot carry
+///   user-supplied directives.
 public func printIntrospectionSchema(schema: GraphQLSchema) -> String {
     return printFilteredSchema(
         schema: schema,
@@ -119,6 +129,11 @@ func hasDefaultRootOperationTypes(schema: GraphQLSchema) -> Bool {
     )
 }
 
+/// Renders a single named type as SDL.
+///
+/// - Note: Never renders applied directives — a lone type carries no schema to
+///   resolve them against. Use `printSchema(schema:appliedDirectives:)` for
+///   directive-annotated output.
 public func printType(type: GraphQLNamedType) -> String {
     return printType(type: type, appliedDirectives: [:], schema: nil)
 }
