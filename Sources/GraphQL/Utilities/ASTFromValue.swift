@@ -131,19 +131,7 @@ func astFromValue(
             return IntValue(value: string)
         }
 
-        // Use JSON stringify, which uses the same string encoding as GraphQL,
-        // then remove the quotes.
-        struct Wrapper: Encodable {
-            let map: Map
-        }
-
-        let data = try GraphQLJSONEncoder().encode(Wrapper(map: serialized))
-        guard let string = String(data: data, encoding: .utf8) else {
-            throw GraphQLError(
-                message: "Unable to convert data to utf8 string: \(data)"
-            )
-        }
-        return StringValue(value: String(string.dropFirst(8).dropLast(2)))
+        return StringValue(value: string)
     }
 
     throw GraphQLError(message: "Cannot convert value to AST: \(serialized)")
