@@ -1,4 +1,4 @@
-import GraphQL
+@testable import GraphQL
 import Testing
 
 /// This follows the graphql-js testing, with deviations where noted.
@@ -158,6 +158,12 @@ import Testing
     ///
     /// Note that due to implementation details in Swift, this will not resolve the "first" one,
     /// but rather a random one of the two
+    ///
+    /// The document is deliberately invalid — SingleFieldSubscriptionsRule
+    /// rejects multi-root subscriptions — so this goes through `subscribe`,
+    /// which takes an already-parsed document and does not validate. That
+    /// mirrors the graphql-js test this is ported from, and pins what execution
+    /// does if an unvalidated document ever reaches it.
     @Test func invalidMultiField() async throws {
         let db = EmailDb()
 
@@ -202,7 +208,7 @@ import Testing
                 ]
             )
         )
-        let subscriptionResult = try await createSubscription(schema: schema, query: """
+        let document = try parse(source: Source(body: """
             subscription {
                 importantEmail {
                     email {
@@ -215,7 +221,13 @@ import Testing
                     }
                 }
             }
-        """)
+        """))
+        let subscriptionResult = try await subscribe(
+            schema: schema,
+            documentAST: document,
+            rootValue: (),
+            context: ()
+        ).get()
         var iterator = subscriptionResult.makeAsyncIterator()
 
         await db.trigger(email: Email(

@@ -5,7 +5,7 @@ public let specifiedRules: [@Sendable (ValidationContext) -> Visitor] = [
     ExecutableDefinitionsRule,
     UniqueOperationNamesRule,
     LoneAnonymousOperationRule,
-//    SingleFieldSubscriptionsRule,
+    SingleFieldSubscriptionsRule,
     KnownTypeNamesRule,
     FragmentsOnCompositeTypesRule,
     VariablesAreInputTypesRule,
