@@ -1,10 +1,14 @@
 import Foundation
 
-public func printSchema(schema: GraphQLSchema) -> String {
+public func printSchema(
+    schema: GraphQLSchema,
+    appliedDirectives: AppliedDirectiveMap = [:]
+) -> String {
     return printFilteredSchema(
         schema: schema,
         directiveFilter: { n in !isSpecifiedDirective(n) },
-        typeFilter: isDefinedType
+        typeFilter: isDefinedType,
+        appliedDirectives: appliedDirectives
     )
 }
 
@@ -12,7 +16,8 @@ public func printIntrospectionSchema(schema: GraphQLSchema) -> String {
     return printFilteredSchema(
         schema: schema,
         directiveFilter: isSpecifiedDirective,
-        typeFilter: isIntrospectionType
+        typeFilter: isIntrospectionType,
+        appliedDirectives: [:]
     )
 }
 
@@ -23,14 +28,17 @@ func isDefinedType(type: GraphQLNamedType) -> Bool {
 func printFilteredSchema(
     schema: GraphQLSchema,
     directiveFilter: (GraphQLDirective) -> Bool,
-    typeFilter: (GraphQLNamedType) -> Bool
+    typeFilter: (GraphQLNamedType) -> Bool,
+    appliedDirectives: AppliedDirectiveMap = [:]
 ) -> String {
     let directives = schema.directives.filter { directiveFilter($0) }
     let types = schema.typeMap.values.filter { typeFilter($0) }
 
     var result = [printSchemaDefinition(schema: schema)]
     result.append(contentsOf: directives.map { printDirective(directive: $0) })
-    result.append(contentsOf: types.map { printType(type: $0) })
+    result.append(contentsOf: types.map {
+        printType(type: $0, appliedDirectives: appliedDirectives, schema: schema)
+    })
 
     return result.compactMap { $0 }
         .joined(separator: "\n\n")
@@ -104,33 +112,47 @@ func hasDefaultRootOperationTypes(schema: GraphQLSchema) -> Bool {
 }
 
 public func printType(type: GraphQLNamedType) -> String {
+    return printType(type: type, appliedDirectives: [:], schema: nil)
+}
+
+func printType(
+    type: GraphQLNamedType,
+    appliedDirectives: AppliedDirectiveMap,
+    schema: GraphQLSchema?
+) -> String {
+    let directives: String = {
+        guard let schema = schema else { return "" }
+        return printAppliedDirectives(.type(type.name), appliedDirectives, schema)
+    }()
+
     if let type = type as? GraphQLScalarType {
-        return printScalar(type: type)
+        return printScalar(type: type, directives: directives)
     }
     if let type = type as? GraphQLObjectType {
-        return printObject(type: type)
+        return printObject(type: type, directives: directives)
     }
     if let type = type as? GraphQLInterfaceType {
-        return printInterface(type: type)
+        return printInterface(type: type, directives: directives)
     }
     if let type = type as? GraphQLUnionType {
-        return printUnion(type: type)
+        return printUnion(type: type, directives: directives)
     }
     if let type = type as? GraphQLEnumType {
-        return printEnum(type: type)
+        return printEnum(type: type, directives: directives)
     }
     if let type = type as? GraphQLInputObjectType {
-        return printInputObject(type: type)
+        return printInputObject(type: type, directives: directives)
     }
 
     // Not reachable, all possible types have been considered.
     fatalError("Unexpected type: " + type.name)
 }
 
-func printScalar(type: GraphQLScalarType) -> String {
+func printScalar(type: GraphQLScalarType, directives: String = "") -> String {
     return printDescription(type.description) +
         "scalar \(type.name)" +
-        printSpecifiedByURL(scalar: type)
+        printSpecifiedByURL(scalar: type) +
+        directives
 }
 
 func printImplementedInterfaces(
@@ -141,31 +163,34 @@ func printImplementedInterfaces(
         : " implements " + interfaces.map { $0.name }.joined(separator: " & ")
 }
 
-func printObject(type: GraphQLObjectType) -> String {
+func printObject(type: GraphQLObjectType, directives: String = "") -> String {
     return
         printDescription(type.description) +
         "type \(type.name)" +
         printImplementedInterfaces(interfaces: (try? type.getInterfaces()) ?? []) +
+        directives +
         printFields(fields: (try? type.getFields()) ?? [:])
 }
 
-func printInterface(type: GraphQLInterfaceType) -> String {
+func printInterface(type: GraphQLInterfaceType, directives: String = "") -> String {
     return
         printDescription(type.description) +
         "interface \(type.name)" +
         printImplementedInterfaces(interfaces: (try? type.getInterfaces()) ?? []) +
+        directives +
         printFields(fields: (try? type.getFields()) ?? [:])
 }
 
-func printUnion(type: GraphQLUnionType) -> String {
+func printUnion(type: GraphQLUnionType, directives: String = "") -> String {
     let types = (try? type.getTypes()) ?? []
     return
         printDescription(type.description) +
         "union \(type.name)" +
+        directives +
         (types.isEmpty ? "" : " = " + types.map { $0.name }.joined(separator: " | "))
 }
 
-func printEnum(type: GraphQLEnumType) -> String {
+func printEnum(type: GraphQLEnumType, directives: String = "") -> String {
     let values = type.values.enumerated().map { i, value in
         printDescription(value.description, indentation: "  ", firstInBlock: i == 0) +
             "  " +
@@ -173,10 +198,11 @@ func printEnum(type: GraphQLEnumType) -> String {
             printDeprecated(reason: value.deprecationReason)
     }
 
-    return printDescription(type.description) + "enum \(type.name)" + printBlock(items: values)
+    return printDescription(type.description) + "enum \(type.name)" + directives +
+        printBlock(items: values)
 }
 
-func printInputObject(type: GraphQLInputObjectType) -> String {
+func printInputObject(type: GraphQLInputObjectType, directives: String = "") -> String {
     let inputFields = (try? type.getFields()) ?? [:]
     let fields = inputFields.values.enumerated().map { i, f in
         printDescription(f.description, indentation: "  ", firstInBlock: i == 0) + "  " +
@@ -187,6 +213,7 @@ func printInputObject(type: GraphQLInputObjectType) -> String {
         printDescription(type.description) +
         "input \(type.name)" +
         (type.isOneOf ? " @oneOf" : "") +
+        directives +
         printBlock(items: fields)
 }
 
