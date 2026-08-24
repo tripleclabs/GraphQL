@@ -19,12 +19,52 @@ public extension GraphQLSchema {
             )
         }
 
-        let schema = try GraphQLSchema(
+        let mutation = try reducedRoot(mutationType, keep: keep)
+        let subscription = try reducedRoot(subscriptionType, keep: keep)
+
+        // Type closure does not walk an interface down to its implementations,
+        // so they must be added back explicitly. Each addition can pull in
+        // further types, which may retain further interfaces, so this repeats
+        // until it stops growing.
+        var extraTypes: [GraphQLNamedType] = []
+        var schema = try GraphQLSchema(
             query: query,
-            mutation: try reducedRoot(mutationType, keep: keep),
-            subscription: try reducedRoot(subscriptionType, keep: keep),
+            mutation: mutation,
+            subscription: subscription,
+            types: extraTypes,
             directives: directives
         )
+
+        while true {
+            var additions: [GraphQLNamedType] = []
+            for type in schema.typeMap.values {
+                guard
+                    let interface = type as? GraphQLInterfaceType,
+                    let impls = implementations[interface.name]
+                else {
+                    continue
+                }
+                for object in impls.objects where schema.typeMap[object.name] == nil {
+                    additions.append(object)
+                }
+                for sub in impls.interfaces where schema.typeMap[sub.name] == nil {
+                    additions.append(sub)
+                }
+            }
+
+            guard !additions.isEmpty else {
+                break
+            }
+
+            extraTypes.append(contentsOf: additions)
+            schema = try GraphQLSchema(
+                query: query,
+                mutation: mutation,
+                subscription: subscription,
+                types: extraTypes,
+                directives: directives
+            )
+        }
 
         let errors = try validateSchema(schema: schema)
         guard errors.isEmpty else {

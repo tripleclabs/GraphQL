@@ -113,3 +113,46 @@ private func sampleSchema() throws -> GraphQLSchema {
         #expect(!projected.contains(.member(type: "Query", member: "search")))
     }
 }
+
+private func interfaceSchema() throws -> GraphQLSchema {
+    let node = try GraphQLInterfaceType(
+        name: "Node",
+        fields: ["id": GraphQLField(type: GraphQLString)]
+    )
+    let account = try GraphQLObjectType(
+        name: "Account",
+        fields: ["id": GraphQLField(type: GraphQLString)],
+        interfaces: [node],
+        isTypeOf: { source, _ in
+            (source as? [String: String])?["kind"] == "account"
+        }
+    )
+    let query = try GraphQLObjectType(
+        name: "Query",
+        fields: [
+            "node": GraphQLField(
+                type: node,
+                resolve: { _, _, _, _ in ["id": "n-1", "kind": "account"] }
+            ),
+        ]
+    )
+    return try GraphQLSchema(query: query, types: [account])
+}
+
+@Suite struct SchemaProjectionInterfaceTests {
+    @Test func includesInterfaceImplementations() throws {
+        let projected = try interfaceSchema().projected { _, field in field == "node" }
+        #expect(projected.typeMap["Node"] != nil)
+        #expect(projected.typeMap["Account"] != nil)
+    }
+
+    @Test func projectionResolvesConcreteTypeAtRuntime() async throws {
+        let projected = try interfaceSchema().projected { _, field in field == "node" }
+        let result = try await graphql(
+            schema: projected,
+            request: "{ node { __typename id } }"
+        )
+        #expect(result.errors.isEmpty)
+        #expect(result.data?["node"]["__typename"].string == "Account")
+    }
+}
