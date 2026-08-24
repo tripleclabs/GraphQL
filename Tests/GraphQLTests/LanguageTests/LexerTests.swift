@@ -182,7 +182,7 @@ func lexOne(_ string: String) throws -> Token {
             end: 20,
             line: 1,
             column: 1,
-            value: "escaped \n\r\u{8}\u{9}\u{12}"
+            value: "escaped \n\r\u{8}\u{9}\u{0C}"
         )
 
         #expect(token == expected)
@@ -1084,5 +1084,25 @@ func lexOne(_ string: String) throws -> Token {
             value: "\"\"\""
         )
         #expect(token == expected)
+    }
+}
+
+@Suite struct LexerFormFeedTests {
+    @Test func formFeedEscapeDecodesToU000C() throws {
+        let doc = try parse(source: Source(body: #"{ f(a: "x\fy") }"#))
+        let operation = try #require(doc.definitions[0] as? OperationDefinition)
+        let field = try #require(operation.selectionSet.selections[0] as? Field)
+        let value = try #require(field.arguments[0].value as? StringValue)
+        #expect(value.value == "x\u{0C}y")
+    }
+
+    @Test func formFeedSurvivesPrintParseRoundTrip() throws {
+        let printed = print(ast: StringValue(value: "x\u{0C}y"))
+        #expect(printed == #""x\fy""#)
+        let doc = try parse(source: Source(body: "{ f(a: \(printed)) }"))
+        let operation = try #require(doc.definitions[0] as? OperationDefinition)
+        let field = try #require(operation.selectionSet.selections[0] as? Field)
+        let value = try #require(field.arguments[0].value as? StringValue)
+        #expect(value.value == "x\u{0C}y")
     }
 }

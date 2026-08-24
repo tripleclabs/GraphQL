@@ -674,7 +674,7 @@ func readString(source: Source, start: Int, line: Int, col: Int, prev: Token) th
                 case 47: value += "/"
                 case 92: value += "\\"
                 case 98: value += "\u{8}"
-                case 102: value += "\u{12}"
+                case 102: value += "\u{0C}" // \f is a form feed, U+000C
                 case 110: value += "\n"
                 case 114: value += "\r"
                 case 116: value += "\t"
