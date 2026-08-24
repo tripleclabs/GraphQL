@@ -34,7 +34,7 @@ func printFilteredSchema(
     let directives = schema.directives.filter { directiveFilter($0) }
     let types = schema.typeMap.values.filter { typeFilter($0) }
 
-    var result = [printSchemaDefinition(schema: schema)]
+    var result = [printSchemaDefinition(schema: schema, appliedDirectives: appliedDirectives)]
     result.append(contentsOf: directives.map { printDirective(directive: $0) })
     result.append(contentsOf: types.map {
         printType(type: $0, appliedDirectives: appliedDirectives, schema: schema)
@@ -44,7 +44,10 @@ func printFilteredSchema(
         .joined(separator: "\n\n")
 }
 
-func printSchemaDefinition(schema: GraphQLSchema) -> String? {
+func printSchemaDefinition(
+    schema: GraphQLSchema,
+    appliedDirectives: AppliedDirectiveMap = [:]
+) -> String? {
     let queryType = schema.queryType
     let mutationType = schema.mutationType
     let subscriptionType = schema.subscriptionType
@@ -55,11 +58,16 @@ func printSchemaDefinition(schema: GraphQLSchema) -> String? {
         return nil
     }
 
-    // Only print a schema definition if there is a description or if it should
-    // not be omitted because of having default type names.
-    if schema.description != nil || !hasDefaultRootOperationTypes(schema: schema) {
+    let directives = printAppliedDirectives(.schema, appliedDirectives, schema)
+
+    // Only print a schema definition if there is a description, an applied
+    // directive that would otherwise be lost, or if it should not be omitted
+    // because of having default type names.
+    if schema.description != nil || !directives.isEmpty ||
+        !hasDefaultRootOperationTypes(schema: schema)
+    {
         var result = printDescription(schema.description) +
-            "schema {\n"
+            "schema" + directives + " {\n"
         if let queryType = queryType {
             result = result + "  query: \(queryType.name)\n"
         }

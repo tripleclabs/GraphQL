@@ -336,3 +336,36 @@ private func memberDirectiveDefinitions() throws -> [GraphQLDirective] {
         #expect(try render() == render())
     }
 }
+
+@Suite struct PrintSchemaDefinitionDirectivesTests {
+    private func linkSchema() throws -> GraphQLSchema {
+        let link = try GraphQLDirective(
+            name: "link",
+            locations: [.schema],
+            args: ["url": GraphQLArgument(type: GraphQLString)]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["a": GraphQLField(type: GraphQLString)]
+        )
+        return try GraphQLSchema(query: query, directives: specifiedDirectives + [link])
+    }
+
+    @Test func schemaBlockIsOmittedWithoutSchemaDirective() throws {
+        let sdl = printSchema(schema: try linkSchema())
+        #expect(!sdl.contains("schema"))
+    }
+
+    @Test func schemaDirectiveForcesSchemaBlockToPrint() throws {
+        let sdl = printSchema(
+            schema: try linkSchema(),
+            appliedDirectives: [
+                .schema: [
+                    AppliedDirective(name: "link", arguments: [("url", "https://example.com/v1")]),
+                ],
+            ]
+        )
+        #expect(sdl.contains("schema @link(url: \"https://example.com/v1\") {"))
+        #expect(sdl.contains("  query: Query"))
+    }
+}
