@@ -154,3 +154,185 @@ private func directiveDefinitions() throws -> [GraphQLDirective] {
         #expect(printSchema(schema: schema) == printSchema(schema: schema, appliedDirectives: [:]))
     }
 }
+
+private func memberDirectiveDefinitions() throws -> [GraphQLDirective] {
+    [
+        try GraphQLDirective(
+            name: "unique",
+            locations: [.fieldDefinition, .enumValue, .inputFieldDefinition, .argumentDefinition]
+        ),
+    ]
+}
+
+@Suite struct PrintSchemaMemberDirectivesTests {
+    @Test func printsDirectiveOnObjectField() throws {
+        let user = try GraphQLObjectType(
+            name: "User",
+            fields: ["email": GraphQLField(type: GraphQLString)]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["user": GraphQLField(type: user)]
+        )
+        let schema = try GraphQLSchema(
+            query: query,
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+        let sdl = printSchema(
+            schema: schema,
+            appliedDirectives: [
+                .member(type: "User", member: "email"): [AppliedDirective(name: "unique")],
+            ]
+        )
+        #expect(sdl.contains("email: String @unique"))
+    }
+
+    @Test func printsDirectiveAfterDeprecatedOnField() throws {
+        let user = try GraphQLObjectType(
+            name: "User",
+            fields: [
+                "old": GraphQLField(type: GraphQLString, deprecationReason: "gone"),
+            ]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["user": GraphQLField(type: user)]
+        )
+        let schema = try GraphQLSchema(
+            query: query,
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+        let sdl = printSchema(
+            schema: schema,
+            appliedDirectives: [
+                .member(type: "User", member: "old"): [AppliedDirective(name: "unique")],
+            ]
+        )
+        #expect(sdl.contains("old: String @deprecated(reason: \"gone\") @unique"))
+    }
+
+    @Test func printsDirectiveOnEnumValue() throws {
+        let role = try GraphQLEnumType(
+            name: "Role",
+            values: ["ADMIN": GraphQLEnumValue(value: .string("ADMIN"))]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["role": GraphQLField(type: role)]
+        )
+        let schema = try GraphQLSchema(
+            query: query,
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+        let sdl = printSchema(
+            schema: schema,
+            appliedDirectives: [
+                .member(type: "Role", member: "ADMIN"): [AppliedDirective(name: "unique")],
+            ]
+        )
+        #expect(sdl.contains("  ADMIN @unique"))
+    }
+
+    @Test func printsDirectiveOnInputField() throws {
+        let filter = try GraphQLInputObjectType(
+            name: "Filter",
+            fields: ["q": InputObjectField(type: GraphQLString)]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: [
+                "search": GraphQLField(
+                    type: GraphQLString,
+                    args: ["filter": GraphQLArgument(type: filter)]
+                ),
+            ]
+        )
+        let schema = try GraphQLSchema(
+            query: query,
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+        let sdl = printSchema(
+            schema: schema,
+            appliedDirectives: [
+                .member(type: "Filter", member: "q"): [AppliedDirective(name: "unique")],
+            ]
+        )
+        #expect(sdl.contains("q: String @unique"))
+    }
+
+    @Test func printsDirectiveOnFieldArgument() throws {
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: [
+                "user": GraphQLField(
+                    type: GraphQLString,
+                    args: ["id": GraphQLArgument(type: GraphQLString)]
+                ),
+            ]
+        )
+        let schema = try GraphQLSchema(
+            query: query,
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+        let sdl = printSchema(
+            schema: schema,
+            appliedDirectives: [
+                .argument(type: "Query", field: "user", argument: "id"): [
+                    AppliedDirective(name: "unique"),
+                ],
+            ]
+        )
+        #expect(sdl.contains("user(id: String @unique): String"))
+    }
+
+    @Test func emittedSDLParsesCleanly() throws {
+        let user = try GraphQLObjectType(
+            name: "User",
+            fields: ["email": GraphQLField(type: GraphQLString)]
+        )
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["user": GraphQLField(type: user)]
+        )
+        let schema = try GraphQLSchema(
+            query: query,
+            directives: specifiedDirectives + memberDirectiveDefinitions()
+        )
+        let sdl = printSchema(
+            schema: schema,
+            appliedDirectives: [
+                .member(type: "User", member: "email"): [AppliedDirective(name: "unique")],
+            ]
+        )
+        _ = try parse(source: Source(body: sdl))
+    }
+
+    @Test func outputIsDeterministicAcrossRuns() throws {
+        func render() throws -> String {
+            let user = try GraphQLObjectType(
+                name: "User",
+                fields: [
+                    "email": GraphQLField(type: GraphQLString),
+                    "name": GraphQLField(type: GraphQLString),
+                ]
+            )
+            let query = try GraphQLObjectType(
+                name: "Query",
+                fields: ["user": GraphQLField(type: user)]
+            )
+            let schema = try GraphQLSchema(
+                query: query,
+                directives: specifiedDirectives + memberDirectiveDefinitions()
+            )
+            return printSchema(
+                schema: schema,
+                appliedDirectives: [
+                    .member(type: "User", member: "email"): [
+                        AppliedDirective(name: "unique"),
+                    ],
+                ]
+            )
+        }
+        #expect(try render() == render())
+    }
+}

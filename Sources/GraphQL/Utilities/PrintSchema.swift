@@ -129,19 +129,39 @@ func printType(
         return printScalar(type: type, directives: directives)
     }
     if let type = type as? GraphQLObjectType {
-        return printObject(type: type, directives: directives)
+        return printObject(
+            type: type,
+            directives: directives,
+            appliedDirectives: appliedDirectives,
+            schema: schema
+        )
     }
     if let type = type as? GraphQLInterfaceType {
-        return printInterface(type: type, directives: directives)
+        return printInterface(
+            type: type,
+            directives: directives,
+            appliedDirectives: appliedDirectives,
+            schema: schema
+        )
     }
     if let type = type as? GraphQLUnionType {
         return printUnion(type: type, directives: directives)
     }
     if let type = type as? GraphQLEnumType {
-        return printEnum(type: type, directives: directives)
+        return printEnum(
+            type: type,
+            directives: directives,
+            appliedDirectives: appliedDirectives,
+            schema: schema
+        )
     }
     if let type = type as? GraphQLInputObjectType {
-        return printInputObject(type: type, directives: directives)
+        return printInputObject(
+            type: type,
+            directives: directives,
+            appliedDirectives: appliedDirectives,
+            schema: schema
+        )
     }
 
     // Not reachable, all possible types have been considered.
@@ -163,22 +183,42 @@ func printImplementedInterfaces(
         : " implements " + interfaces.map { $0.name }.joined(separator: " & ")
 }
 
-func printObject(type: GraphQLObjectType, directives: String = "") -> String {
+func printObject(
+    type: GraphQLObjectType,
+    directives: String = "",
+    appliedDirectives: AppliedDirectiveMap = [:],
+    schema: GraphQLSchema? = nil
+) -> String {
     return
         printDescription(type.description) +
         "type \(type.name)" +
         printImplementedInterfaces(interfaces: (try? type.getInterfaces()) ?? []) +
         directives +
-        printFields(fields: (try? type.getFields()) ?? [:])
+        printFields(
+            fields: (try? type.getFields()) ?? [:],
+            typeName: type.name,
+            appliedDirectives: appliedDirectives,
+            schema: schema
+        )
 }
 
-func printInterface(type: GraphQLInterfaceType, directives: String = "") -> String {
+func printInterface(
+    type: GraphQLInterfaceType,
+    directives: String = "",
+    appliedDirectives: AppliedDirectiveMap = [:],
+    schema: GraphQLSchema? = nil
+) -> String {
     return
         printDescription(type.description) +
         "interface \(type.name)" +
         printImplementedInterfaces(interfaces: (try? type.getInterfaces()) ?? []) +
         directives +
-        printFields(fields: (try? type.getFields()) ?? [:])
+        printFields(
+            fields: (try? type.getFields()) ?? [:],
+            typeName: type.name,
+            appliedDirectives: appliedDirectives,
+            schema: schema
+        )
 }
 
 func printUnion(type: GraphQLUnionType, directives: String = "") -> String {
@@ -190,23 +230,52 @@ func printUnion(type: GraphQLUnionType, directives: String = "") -> String {
         (types.isEmpty ? "" : " = " + types.map { $0.name }.joined(separator: " | "))
 }
 
-func printEnum(type: GraphQLEnumType, directives: String = "") -> String {
+func printEnum(
+    type: GraphQLEnumType,
+    directives: String = "",
+    appliedDirectives: AppliedDirectiveMap = [:],
+    schema: GraphQLSchema? = nil
+) -> String {
     let values = type.values.enumerated().map { i, value in
-        printDescription(value.description, indentation: "  ", firstInBlock: i == 0) +
+        let valueDirectives: String = {
+            guard let schema = schema else { return "" }
+            return printAppliedDirectives(
+                .member(type: type.name, member: value.name),
+                appliedDirectives,
+                schema
+            )
+        }()
+
+        return printDescription(value.description, indentation: "  ", firstInBlock: i == 0) +
             "  " +
             value.name +
-            printDeprecated(reason: value.deprecationReason)
+            printDeprecated(reason: value.deprecationReason) +
+            valueDirectives
     }
 
     return printDescription(type.description) + "enum \(type.name)" + directives +
         printBlock(items: values)
 }
 
-func printInputObject(type: GraphQLInputObjectType, directives: String = "") -> String {
+func printInputObject(
+    type: GraphQLInputObjectType,
+    directives: String = "",
+    appliedDirectives: AppliedDirectiveMap = [:],
+    schema: GraphQLSchema? = nil
+) -> String {
     let inputFields = (try? type.getFields()) ?? [:]
     let fields = inputFields.values.enumerated().map { i, f in
-        printDescription(f.description, indentation: "  ", firstInBlock: i == 0) + "  " +
-            printInputValue(arg: f)
+        let fieldDirectives: String = {
+            guard let schema = schema else { return "" }
+            return printAppliedDirectives(
+                .member(type: type.name, member: f.name),
+                appliedDirectives,
+                schema
+            )
+        }()
+
+        return printDescription(f.description, indentation: "  ", firstInBlock: i == 0) + "  " +
+            printInputValue(arg: f) + fieldDirectives
     }
 
     return
@@ -217,15 +286,37 @@ func printInputObject(type: GraphQLInputObjectType, directives: String = "") -> 
         printBlock(items: fields)
 }
 
-func printFields(fields: GraphQLFieldDefinitionMap) -> String {
+func printFields(
+    fields: GraphQLFieldDefinitionMap,
+    typeName: String = "",
+    appliedDirectives: AppliedDirectiveMap = [:],
+    schema: GraphQLSchema? = nil
+) -> String {
     let fields = fields.values.enumerated().map { i, f in
-        printDescription(f.description, indentation: "  ", firstInBlock: i == 0) +
+        let fieldDirectives: String = {
+            guard let schema = schema else { return "" }
+            return printAppliedDirectives(
+                .member(type: typeName, member: f.name),
+                appliedDirectives,
+                schema
+            )
+        }()
+
+        return printDescription(f.description, indentation: "  ", firstInBlock: i == 0) +
             "  " +
             f.name +
-            printArgs(args: f.args, indentation: "  ") +
+            printArgs(
+                args: f.args,
+                indentation: "  ",
+                typeName: typeName,
+                fieldName: f.name,
+                appliedDirectives: appliedDirectives,
+                schema: schema
+            ) +
             ": " +
             f.type.debugDescription +
-            printDeprecated(reason: f.deprecationReason)
+            printDeprecated(reason: f.deprecationReason) +
+            fieldDirectives
     }
     return printBlock(items: fields)
 }
@@ -236,15 +327,29 @@ func printBlock(items: [String]) -> String {
 
 func printArgs(
     args: [GraphQLArgumentDefinition],
-    indentation: String = ""
+    indentation: String = "",
+    typeName: String = "",
+    fieldName: String = "",
+    appliedDirectives: AppliedDirectiveMap = [:],
+    schema: GraphQLSchema? = nil
 ) -> String {
     if args.isEmpty {
         return ""
     }
 
+    func directives(for arg: GraphQLArgumentDefinition) -> String {
+        guard let schema = schema else { return "" }
+        return printAppliedDirectives(
+            .argument(type: typeName, field: fieldName, argument: arg.name),
+            appliedDirectives,
+            schema
+        )
+    }
+
     // If every arg does not have a description, print them on one line.
     if args.allSatisfy({ $0.description == nil }) {
-        return "(" + args.map { printArgValue(arg: $0) }.joined(separator: ", ") + ")"
+        return "(" + args.map { printArgValue(arg: $0) + directives(for: $0) }
+            .joined(separator: ", ") + ")"
     }
 
     return
@@ -257,7 +362,8 @@ func printArgs(
             ) +
                 "  " +
                 indentation +
-                printArgValue(arg: arg)
+                printArgValue(arg: arg) +
+                directives(for: arg)
         }.joined(separator: "\n") +
         "\n" +
         indentation +
