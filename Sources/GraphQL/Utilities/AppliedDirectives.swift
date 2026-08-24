@@ -137,3 +137,21 @@ public extension AppliedDirective {
         return errors
     }
 }
+
+public extension AppliedDirective {
+    /// The value of a named argument, if the directive was applied with one.
+    subscript(_ argument: String) -> Map? {
+        arguments.first { $0.0 == argument }?.1
+    }
+
+    /// True when the named argument is a list containing `value`.
+    ///
+    /// Returns false when the argument is absent or is not a list — this is
+    /// list membership, not equality.
+    func argument(_ name: String, contains value: Map) -> Bool {
+        guard case let .array(values)? = self[name] else {
+            return false
+        }
+        return values.contains(value)
+    }
+}

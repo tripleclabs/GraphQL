@@ -171,3 +171,36 @@ private func schemaWithDirectives() throws -> GraphQLSchema {
         #expect(printAppliedDirectives(.type("User"), map, try schema()) == "")
     }
 }
+
+@Suite struct AppliedDirectiveArgumentAccessTests {
+    private let themed = AppliedDirective(
+        name: "theme",
+        arguments: [("names", ["billing", "admin"]), ("owner", "payments")]
+    )
+
+    @Test func subscriptReturnsArgumentValue() throws {
+        #expect(themed["owner"] == Map.string("payments"))
+    }
+
+    @Test func subscriptReturnsNilForAbsentArgument() throws {
+        #expect(themed["nope"] == nil)
+    }
+
+    @Test func containsFindsListMembership() throws {
+        #expect(themed.argument("names", contains: "billing"))
+        #expect(themed.argument("names", contains: "admin"))
+    }
+
+    @Test func containsRejectsAbsentMember() throws {
+        #expect(!themed.argument("names", contains: "search"))
+    }
+
+    @Test func containsIsFalseForAbsentArgument() throws {
+        #expect(!themed.argument("nope", contains: "billing"))
+    }
+
+    @Test func containsIsFalseForNonListArgument() throws {
+        // "owner" is a scalar; contains is list membership only.
+        #expect(!themed.argument("owner", contains: "payments"))
+    }
+}
