@@ -259,3 +259,49 @@ import Testing
         )
     }
 }
+
+/// `__InputValue.defaultValue` is produced by `astFromValue`, so it shares the
+/// string encoding used when printing SDL. The `defaultValues` fixture above
+/// only covers `"hello"`, which is identical under any encoding; these pin the
+/// characters that actually distinguish one encoding from another.
+@Suite struct IntrospectionDefaultValueEncodingTests {
+    private func introspectDefault(_ defaultValue: Map) async throws -> String? {
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: [
+                "f": GraphQLField(
+                    type: GraphQLString,
+                    args: [
+                        "a": GraphQLArgument(type: GraphQLString, defaultValue: defaultValue),
+                    ]
+                ),
+            ]
+        )
+        let schema = try GraphQLSchema(query: query)
+        let result = try await graphql(
+            schema: schema,
+            request: """
+            query {
+              __type(name: "Query") {
+                fields { args { defaultValue } }
+              }
+            }
+            """
+        )
+        return result.data?["__type"]["fields"][0]["args"][0]["defaultValue"].string
+    }
+
+    @Test func slashesAreNotEscaped() async throws {
+        // The old JSON round-trip produced "http:\\/\\/x.com\\/y", and \/ is not
+        // a valid escape in a GraphQL string literal, so clients could not parse it.
+        #expect(try await introspectDefault("http://x.com/y") == "\"http://x.com/y\"")
+    }
+
+    @Test func quotesAndBackslashesAreStillEscaped() async throws {
+        #expect(try await introspectDefault("a\"b\\c") == "\"a\\\"b\\\\c\"")
+    }
+
+    @Test func controlCharactersAreStillEscaped() async throws {
+        #expect(try await introspectDefault("a\nb") == "\"a\\nb\"")
+    }
+}
