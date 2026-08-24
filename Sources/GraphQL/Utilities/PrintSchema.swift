@@ -439,8 +439,8 @@ func printSpecifiedByURL(scalar: GraphQLScalarType) -> String {
     guard let specifiedByURL = scalar.specifiedByURL else {
         return ""
     }
-    let astValue = StringValue(value: specifiedByURL)
-    return " @specifiedBy(url: \"\(astValue.value)\")"
+    let astValue = print(ast: StringValue(value: specifiedByURL))
+    return " @specifiedBy(url: \(astValue))"
 }
 
 func printDescription(

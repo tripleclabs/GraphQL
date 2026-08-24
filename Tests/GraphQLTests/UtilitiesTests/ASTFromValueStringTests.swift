@@ -39,3 +39,26 @@ import Testing
         #expect(print(ast: stringValue) == "\"a\\nb\\\"c\\\\d\"")
     }
 }
+
+@Suite struct SpecifiedByURLPrintingTests {
+    private func sdl(for url: String) throws -> String {
+        let scalar = try GraphQLScalarType(name: "S", specifiedByURL: url)
+        let query = try GraphQLObjectType(
+            name: "Query",
+            fields: ["s": GraphQLField(type: scalar)]
+        )
+        return printSchema(schema: try GraphQLSchema(query: query))
+    }
+
+    @Test func ordinaryURLPrintsUnchanged() throws {
+        #expect(try sdl(for: "http://x.com/y").contains(
+            "scalar S @specifiedBy(url: \"http://x.com/y\")"
+        ))
+    }
+
+    @Test func urlContainingAQuoteStaysParseable() throws {
+        // Raw interpolation into hand-written quotes produced unparseable SDL.
+        let printed = try sdl(for: "http://x/\"q\"")
+        _ = try parse(source: Source(body: printed))
+    }
+}
