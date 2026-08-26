@@ -686,22 +686,35 @@ func validateOneOfInputObjectField(
 func createInputObjectCircularRefsValidator(
     context: SchemaValidationContext
 ) throws -> (GraphQLInputObjectType) throws -> Void {
+    let validator = InputObjectCircularRefsValidator(context: context)
+    return { inputObj in try validator.detectCycleRecursive(inputObj: inputObj) }
+}
+
+/// Detects Input Objects that reference themselves through a chain of non-null fields.
+///
+/// The traversal state lives on a class rather than in locals captured by an escaping
+/// nested function. The nested-function form miscompiled under optimisation: the captures
+/// were not promoted to the heap, so by the time the returned function ran, `fieldPath`
+/// addressed the frame of a function that had already returned, and reading its count
+/// segfaulted. Debug builds box the captures and so appeared to work, which is why this
+/// only ever surfaced in release builds.
+final class InputObjectCircularRefsValidator {
     // Modified copy of algorithm from 'src/validation/rules/NoFragmentCycles.js'.
     // Tracks already visited types to maintain O(N) and to ensure that cycles
     // are not redundantly reported.
-    var visitedTypes = Set<GraphQLInputObjectType>()
+    private let context: SchemaValidationContext
+    private var visitedTypes = Set<GraphQLInputObjectType>()
 
     // Array of types nodes used to produce meaningful errors
-    var fieldPath: [InputObjectFieldDefinition] = []
+    private var fieldPath: [InputObjectFieldDefinition] = []
 
     // Position in the type path
-    var fieldPathIndexByTypeName: [String: Int] = [:]
+    private var fieldPathIndexByTypeName: [String: Int] = [:]
 
-    return detectCycleRecursive
+    init(context: SchemaValidationContext) {
+        self.context = context
+    }
 
-    /// This does a straight-forward DFS to find cycles.
-    /// It does not terminate when a cycle is found but continues to explore
-    /// the graph to find all possible cycles.
     func detectCycleRecursive(inputObj: GraphQLInputObjectType) throws {
         if visitedTypes.contains(inputObj) {
             return
