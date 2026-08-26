@@ -72,10 +72,16 @@ func validate(value: Map, forType type: GraphQLInputType) throws -> [String] {
                 )
             }
 
-            let key = keys[0]
-            let value = dictionary[key]
-            if value == .null {
-                errors.append("Field \"\(key)\" must be non-null.")
+            // Only reachable when there *is* a key. This used to index
+            // unconditionally, so `{}` against a OneOf input — zero keys — trapped
+            // on out-of-range instead of returning the error recorded just above.
+            // A validation path must never crash on input it is validating: the
+            // whole point is that the input is untrusted.
+            if let key = keys.first {
+                let value = dictionary[key]
+                if value == .null {
+                    errors.append("Field \"\(key)\" must be non-null.")
+                }
             }
         }
 

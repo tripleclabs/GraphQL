@@ -71,6 +71,31 @@ import Testing
         )
     }
 
+    /// An empty object is zero keys, and a OneOf input requires exactly one.
+    ///
+    /// This used to trap rather than fail: the validator recorded the
+    /// "exactly one key" error and then indexed `keys[0]` unconditionally, so
+    /// `{}` took the process down with an out-of-range crash. A validation path
+    /// crashing on the input it is validating is the worst possible failure —
+    /// the input is untrusted by definition, so any client could do it.
+    @Test func rejectsAnEmptyVariableWithoutCrashing() async throws {
+        let query = """
+        query ($input: TestInputObject!) {
+          test(input: $input) {
+            a
+            b
+          }
+        }
+        """
+        let result = try await graphql(
+            schema: getSchema(),
+            request: query,
+            variableValues: ["input": [:]]
+        )
+        #expect(result.errors.count == 1)
+        #expect(result.errors[0].message.contains("Exactly one key must be specified"))
+    }
+
     @Test func acceptsAGoodVariableWithAnUndefinedKey() async throws {
         let query = """
         query ($input: TestInputObject!) {
